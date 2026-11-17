@@ -438,6 +438,38 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(try store.trigger(for: "jon")?.delaySeconds, 5, "a migração roda uma vez só")
     }
 
+    func testUpdateVersionsReleaseParsingAndChecksum() throws {
+        XCTAssertTrue(AppUpdate.isNewer("v0.2.0", than: "0.1.0"))
+        XCTAssertTrue(AppUpdate.isNewer("0.10.0", than: "0.9.9"), "compara números, não texto")
+        XCTAssertTrue(AppUpdate.isNewer("1.0.1", than: "1.0"))
+        XCTAssertFalse(AppUpdate.isNewer("0.1.0", than: "0.1.0"))
+        XCTAssertFalse(AppUpdate.isNewer("0.1.0", than: "0.2.0"))
+        XCTAssertFalse(AppUpdate.isNewer("nightly", than: "0.1.0"))
+        XCTAssertFalse(AppUpdate.isNewer("1.0.0", than: "dev"), "build local sem versão não oferece atualização")
+
+        let json = """
+        {"tag_name":"v0.2.0","html_url":"https://github.com/raffaelps/kiro-chat/releases/tag/v0.2.0",
+         "body":"- Novidade","published_at":"2026-11-17T21:00:00Z",
+         "assets":[{"name":"KiroChat.zip","browser_download_url":"https://example.com/KiroChat.zip"},
+                   {"name":"KiroChat.zip.sha256","browser_download_url":"https://example.com/KiroChat.zip.sha256"}]}
+        """
+        let r = try AppUpdate.parseRelease(Data(json.utf8))
+        XCTAssertEqual(r.version, "0.2.0")
+        XCTAssertEqual(r.zipURL.absoluteString, "https://example.com/KiroChat.zip")
+        XCTAssertNotNil(r.checksumURL)
+        XCTAssertNotNil(r.publishedAt)
+        XCTAssertThrowsError(try AppUpdate.parseRelease(Data(#"{"message":"Not Found"}"#.utf8)))
+        XCTAssertThrowsError(try AppUpdate.parseRelease(Data(#"{"tag_name":"v0.3.0","assets":[]}"#.utf8)), "sem o zip")
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("kirochat-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("abc".utf8).write(to: file)
+        let hash = try AppUpdate.sha256(of: file)
+        XCTAssertEqual(hash, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(AppUpdate.expectedChecksum(from: "\(hash.uppercased())  KiroChat.zip\n"), hash)
+        XCTAssertNil(AppUpdate.expectedChecksum(from: "não é hash"))
+    }
+
     func testReservedAndEmpty() {
         XCTAssertThrowsError(try store.registerBot("todos"))
         XCTAssertThrowsError(try store.post(sender: "x", text: "   "))

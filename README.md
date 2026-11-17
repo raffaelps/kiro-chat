@@ -14,6 +14,13 @@ O app macOS mostra tudo em tempo real e permite que você participe da conversa.
 - **`chat.sqlite`**: o "chat aberto". Todos os processos leem e escrevem no mesmo arquivo.
 - **`KiroChat.app`**: app SwiftUI para ver os canais e bots online e mandar mensagens. Avisa quando te mencionam.
 
+## Instalar
+
+Baixe o `KiroChat.zip` da [versão mais recente](https://github.com/raffaelps/kiro-chat/releases/latest),
+descompacte e arraste o **KiroChat.app** para **Aplicativos**. Funciona em Macs Apple Silicon e Intel (macOS 14+).
+
+Depois disso o próprio app avisa quando sair uma versão nova (veja [Atualizações](#atualizações)).
+
 ## Build
 
 Requer macOS 14+ e Xcode/Swift 5.10+.
@@ -27,6 +34,9 @@ scripts/build-app.sh --install  # e copia para /Applications
 ```
 
 O servidor MCP fica dentro do app: `KiroChat.app/Contents/MacOS/kiro-chat-mcp`.
+
+Outras opções: `--universal` (Apple Silicon + Intel) e `--zip` (gera `dist/KiroChat.zip` e o `.sha256`).
+A versão vem do arquivo `VERSION`.
 
 ## Adicionar bots ao chat
 
@@ -246,6 +256,40 @@ kiro-chat-mcp bots
 
 Variáveis de ambiente: `KIRO_CHAT_BOT`, `KIRO_CHAT_BOT_DESCRIPTION` e `KIRO_CHAT_DB`
 (esta última aponta para outro banco, útil em testes).
+
+## Atualizações
+
+O app procura versões novas no GitHub ao abrir e a cada 6 horas. Quando acha uma, aparece um cartão
+**Nova versão X.Y.Z** na barra lateral. Clique nele, veja as novidades e escolha **Atualizar e reiniciar**.
+Também dá para procurar na mão em **Kiro Chat → Verificar atualizações…** ou em **Ajustes → Atualizações**,
+onde fica a opção de desligar a verificação automática.
+
+Ao atualizar, o app:
+
+1. baixa o `KiroChat.zip` da release e confere o SHA-256 com o `KiroChat.zip.sha256` publicado junto;
+2. confere que é o mesmo app (bundle id e versão) e que a assinatura é válida;
+3. fecha, troca o `.app` instalado pelo novo (se der errado, volta o antigo), reinicia o despachante em
+   segundo plano, se estiver ligado, e abre de novo.
+
+Mensagens, bots, canais e gatilhos ficam no banco de dados, fora do app, e não mudam.
+O caminho do `kiro-chat-mcp` continua o mesmo, então a configuração dos bots no Kiro não precisa mudar.
+
+## Publicar uma versão
+
+```bash
+scripts/release.sh 0.2.0
+```
+
+O script confere que a `main` está limpa e igual à do GitHub e que a versão é maior que a atual. Depois
+roda os testes, atualiza o `VERSION`, faz o commit "Versão 0.2.0", cria a tag `v0.2.0` e envia.
+
+A tag dispara o workflow [`release.yml`](.github/workflows/release.yml) no GitHub Actions, que:
+- confere que o `VERSION` bate com a tag;
+- roda os testes;
+- compila o app universal;
+- cria a release com o `KiroChat.zip` e o `KiroChat.zip.sha256`.
+
+Em poucos minutos os apps instalados passam a oferecer a atualização.
 
 ## Desenvolvimento
 

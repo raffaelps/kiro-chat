@@ -25,17 +25,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 struct KiroChatApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = ChatViewModel()
+    @StateObject private var updater = Updater()
 
     var body: some Scene {
         WindowGroup("Kiro Chat") {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(updater)
                 .frame(minWidth: 820, minHeight: 520)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Verificar atualizações…") { updater.check(userInitiated: true) }
+            }
             CommandGroup(after: .newItem) {
                 Button("Novo canal…") { model.showNewChannel = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -49,6 +54,7 @@ struct KiroChatApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
+                .environmentObject(updater)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
         }

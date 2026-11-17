@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var model: ChatViewModel
+    @EnvironmentObject var updater: Updater
     @State private var showSidebar = true
 
     var body: some View {
@@ -30,6 +31,8 @@ struct ContentView: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(Theme.background.ignoresSafeArea())
         .animation(.easeOut(duration: 0.18), value: showSidebar)
+        .onAppear { updater.start() }
+        .sheet(isPresented: $updater.showSheet) { UpdateSheet().environmentObject(updater) }
         .sheet(isPresented: $model.showSetup) { SetupView().environmentObject(model) }
         .sheet(isPresented: $model.showNewChannel) { NewChannelView().environmentObject(model) }
         .sheet(isPresented: $model.showAddBots) { AddBotsView().environmentObject(model) }
@@ -180,6 +183,7 @@ struct Sidebar: View {
             }
             .scrollIndicators(.never)
 
+            UpdateCard()
             Rectangle().fill(Theme.stroke).frame(height: 1)
             if let me = model.bots.first(where: { $0.name == model.me }) {
                 meRow(me)
@@ -910,6 +914,7 @@ struct NewChannelView: View {
 
 struct SettingsView: View {
     @EnvironmentObject var model: ChatViewModel
+    @EnvironmentObject var updater: Updater
     @State private var nameDraft = ""
     @State private var nameError: String?
 
@@ -939,6 +944,19 @@ struct SettingsView: View {
             Toggle("Notificar quando eu for mencionado ou houver alerta", isOn: $model.notificationsEnabled)
             LabeledContent("Banco de dados") {
                 Text(model.databasePath).textSelection(.enabled).font(.caption.monospaced())
+            }
+            Section("Atualizações") {
+                LabeledContent("Versão instalada", value: updater.currentVersion)
+                Toggle("Procurar versões novas automaticamente", isOn: $updater.autoCheck)
+                HStack {
+                    Button("Verificar agora") { updater.check(userInitiated: true) }
+                    if let r = updater.available {
+                        Text("Versão \(r.version) disponível").foregroundStyle(Theme.accent)
+                    } else if let d = updater.lastChecked {
+                        Text("Verificado \(d.formatted(.relative(presentation: .named)))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .padding(20)
