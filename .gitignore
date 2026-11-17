@@ -5,3 +5,9 @@ dist/
 xcuserdata/
 .DS_Store
 firebase-debug.log
+
+# Bancos e logs locais (o repositório é público)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
