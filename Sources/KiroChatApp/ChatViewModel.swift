@@ -16,6 +16,12 @@ final class ChatViewModel: ObservableObject {
             loadSelectedChannel()
         }
     }
+    /// Quadro de tarefas aberto no lugar da conversa.
+    @Published var showBoard = false
+    @Published private(set) var tasks: [ChatTask] = []
+    /// Tarefa sendo criada ou editada (folha de edição).
+    @Published var taskEditor: TaskEditorRequest?
+    private var tasksSignature = ""
     @Published var draft = "" {
         didSet { if draft != oldValue { suggestionIndex = 0 } }
     }
@@ -103,11 +109,17 @@ final class ChatViewModel: ObservableObject {
             if store.wakePaused != botsPaused { botsPaused = store.wakePaused }
             if store.maxBotHops != maxBotHops { maxBotHops = store.maxBotHops }
 
+            let sig = try store.tasksSignature()
+            if sig != tasksSignature {
+                tasksSignature = sig
+                tasks = try store.tasks()
+            }
+
             if let channel = selectedChannel {
                 let after = messages.last?.id ?? 0
                 let fresh = try store.messages(channel: channel, afterId: after, limit: 500)
                 if !fresh.isEmpty { messages.append(contentsOf: fresh) }
-                if let last = messages.last, NSApp.isActive {
+                if let last = messages.last, NSApp.isActive, !showBoard {
                     try store.setReadCursor(bot: me, channel: channel, lastId: last.id)
                     try store.markMentionsRead(for: me, messageIds: fresh.filter { $0.mentions.contains(me) }.map(\.id))
                 }
@@ -156,6 +168,51 @@ final class ChatViewModel: ObservableObject {
     }
 
     // MARK: - Ações
+
+    /// Abre a conversa de um canal (e fecha o quadro de tarefas, se estiver aberto).
+    func open(channel: String) {
+        showBoard = false
+        selectedChannel = channel
+    }
+
+    // MARK: - Tarefas
+
+    func saveTask(id: Int64?, title: String, notes: String, status: TaskStatus, assignee: String?, due: String?) {
+        guard let store else { return }
+        do {
+            if let id {
+                try store.updateTask(id: id, TaskPatch(title: title, notes: notes, status: status,
+                                                       assignee: assignee ?? "", due: due ?? ""), by: me)
+            } else {
+                try store.createTask(title: title, notes: notes, status: status, assignee: assignee, due: due, by: me)
+            }
+            refresh()
+        } catch {
+            errorMessage = "\(error)"
+        }
+    }
+
+    func moveTask(_ id: Int64, to status: TaskStatus) {
+        guard let store, let t = tasks.first(where: { $0.id == id }), t.status != status else { return }
+        // Já mostra na coluna nova; o banco confirma em seguida.
+        if let i = tasks.firstIndex(where: { $0.id == id }) { tasks[i].status = status }
+        do {
+            try store.updateTask(id: id, TaskPatch(status: status), by: me)
+            refresh()
+        } catch {
+            errorMessage = "\(error)"
+        }
+    }
+
+    func deleteTask(_ id: Int64) {
+        guard let store else { return }
+        do {
+            try store.deleteTask(id: id)
+            refresh()
+        } catch {
+            errorMessage = "\(error)"
+        }
+    }
 
     func send() {
         guard let store, let channel = selectedChannel else { return }
@@ -313,6 +370,7 @@ final class ChatViewModel: ObservableObject {
     /// Abre (ou cria) a conversa direta com um bot e a seleciona.
     func openDirect(with bot: String) {
         do {
+            showBoard = false
             selectedChannel = try store?.openDirectChannel(with: bot, by: me)
             refresh()
             focusComposer &+= 1
@@ -451,6 +509,7 @@ final class ChatViewModel: ObservableObject {
             let n = try store.createChannel(name, topic: topic)
             try store.post(channel: n, sender: "sistema", text: "📢 \(handle(for: me)) criou o canal #\(n).", kind: .system)
             refresh()
+            showBoard = false
             selectedChannel = n
         } catch {
             errorMessage = "\(error)"
@@ -502,4 +561,12 @@ final class ChatViewModel: ObservableObject {
         try? store.removeBot(name)
         refresh()
     }
+}
+
+/// Pedido para abrir a folha de tarefa: nova (com status e data sugeridos) ou edição.
+struct TaskEditorRequest: Identifiable {
+    let id = UUID()
+    var task: ChatTask?
+    var status: TaskStatus = .backlog
+    var due: String?
 }

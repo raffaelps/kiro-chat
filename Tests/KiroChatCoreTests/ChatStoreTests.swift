@@ -684,6 +684,103 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertNil(AppUpdate.expectedChecksum(from: "não é hash"))
     }
 
+    func testTaskDatesAndStatus() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/Sao_Paulo")!
+        let now = cal.date(from: DateComponents(year: 2026, month: 12, day: 30, hour: 23, minute: 50))!
+        XCTAssertEqual(TaskDates.parse("hoje", now: now, calendar: cal), "2026-12-30")
+        XCTAssertEqual(TaskDates.parse("Amanhã", now: now, calendar: cal), "2026-12-31")
+        XCTAssertEqual(TaskDates.parse("depois de amanhã", now: now, calendar: cal), "2027-01-01")
+        XCTAssertEqual(TaskDates.parse("2027-02-03", now: now, calendar: cal), "2027-02-03")
+        XCTAssertEqual(TaskDates.parse("05/01", now: now, calendar: cal), "2027-01-05")   // janeiro que vem
+        XCTAssertEqual(TaskDates.parse("20/12/2026", now: now, calendar: cal), "2026-12-20")
+        XCTAssertEqual(TaskDates.parse("sem data", now: now, calendar: cal), "")
+        XCTAssertNil(TaskDates.parse("31/02", now: now, calendar: cal))
+        XCTAssertNil(TaskDates.parse("semana que vem", now: now, calendar: cal))
+        XCTAssertEqual(TaskDay.of("2026-12-29", now: now, calendar: cal), .overdue)
+        XCTAssertEqual(TaskDay.of("2026-12-30", now: now, calendar: cal), .today)
+        XCTAssertEqual(TaskDay.of("2026-12-31", now: now, calendar: cal), .tomorrow)
+        XCTAssertEqual(TaskDay.of("2027-01-01", now: now, calendar: cal), .future)
+        XCTAssertEqual(TaskDay.of(nil, now: now, calendar: cal), TaskDay.none)
+        XCTAssertEqual(TaskDates.label("2026-12-31", now: now, calendar: cal), "amanhã")
+        XCTAssertEqual(TaskStatus.parse("Em andamento"), .inProgress)
+        XCTAssertEqual(TaskStatus.parse("in_progress"), .inProgress)
+        XCTAssertEqual(TaskStatus.parse("concluído."), .done)
+        XCTAssertEqual(TaskStatus.parse("Aguardando"), .waiting)
+        XCTAssertNil(TaskStatus.parse("talvez"))
+    }
+
+    func testTasksStoreAndSignature() throws {
+        let before = try store.tasksSignature()
+        let t = try store.createTask(title: "  Corrigir o login ", assignee: "@Robb", due: "hoje", by: "Jon")
+        XCTAssertEqual(t.title, "Corrigir o login")
+        XCTAssertEqual(t.status, .backlog)
+        XCTAssertEqual(t.assignee, "robb")
+        XCTAssertEqual(t.due, TaskDates.string(from: Date()))
+        XCTAssertEqual(t.createdBy, "jon")
+        XCTAssertNotEqual(try store.tasksSignature(), before)
+        XCTAssertThrowsError(try store.createTask(title: "  ", by: "jon"))
+        XCTAssertThrowsError(try store.createTask(title: "x", due: "ontem à noite", by: "jon"))
+
+        let sig = try store.tasksSignature()
+        let moved = try store.updateTask(id: t.id, TaskPatch(status: .inProgress, assignee: "", due: ""), by: "robb")
+        XCTAssertEqual(moved.status, .inProgress)
+        XCTAssertNil(moved.assignee)
+        XCTAssertNil(moved.due)
+        XCTAssertEqual(moved.updatedBy, "robb")
+        XCTAssertNotEqual(try store.tasksSignature(), sig)
+        XCTAssertThrowsError(try store.updateTask(id: 999, TaskPatch(status: .done), by: "robb"))
+
+        try store.createTask(title: "Feita", status: .done, by: "jon")
+        try store.createTask(title: "Do Robb", assignee: "robb", by: "jon")
+        XCTAssertEqual(try store.tasks().count, 3)
+        XCTAssertEqual(try store.tasks(includeDone: false).map(\.title), ["Corrigir o login", "Do Robb"])
+        XCTAssertEqual(try store.tasks(status: .done).map(\.title), ["Feita"])
+        XCTAssertEqual(try store.tasks(assignee: "Robb").map(\.title), ["Do Robb"])
+        try store.deleteTask(id: t.id)
+        XCTAssertNil(try store.task(id: t.id))
+    }
+
+    func testTaskMarkersInBotReply() throws {
+        try store.registerBot("Robb")
+        let reply = """
+        Vou cuidar disso.
+        [TAREFA nova] Atualizar o dashboard | data: amanhã | para: @robb | status: andamento
+        - [TAREFA nova] Revisar PR #4242
+        [TAREFA #99] feito
+        ```
+        [TAREFA nova] isto é exemplo dentro de código
+        ```
+        """
+        let r = TaskMarkers.apply(in: reply, by: "robb", store: store)
+        XCTAssertEqual(r.changed.count, 2)
+        let dash = try XCTUnwrap(try store.tasks().first { $0.title == "Atualizar o dashboard" })
+        XCTAssertEqual(dash.status, .inProgress)
+        XCTAssertEqual(dash.assignee, "robb")
+        XCTAssertEqual(dash.day(), .tomorrow)
+        XCTAssertEqual(dash.createdBy, "robb")
+        XCTAssertTrue(r.text.contains("📋 Nova tarefa #\(dash.id): **Atualizar o dashboard** · Em andamento · amanhã · para Robb"))
+        XCTAssertTrue(r.text.contains("Revisar PR #4242** · Backlog"))
+        XCTAssertTrue(r.text.contains("⚠️ Não mudei a tarefa #99"))
+        XCTAssertTrue(r.text.contains("[TAREFA nova] isto é exemplo dentro de código"))   // código fica como está
+        XCTAssertFalse(r.text.contains("[TAREFA nova] Atualizar"))
+
+        let moved = TaskMarkers.apply(in: "[TAREFA #\(dash.id)] status: feito | data: hoje", by: "robb", store: store)
+        XCTAssertEqual(try store.task(id: dash.id)?.status, .done)
+        XCTAssertEqual(moved.text, "📋 Tarefa #\(dash.id) **Atualizar o dashboard** → Feito · hoje")
+        XCTAssertTrue(TaskMarkers.apply(in: "[TAREFA #\(dash.id)] talvez", by: "robb", store: store).text.hasPrefix("⚠️"))
+
+        // O prompt dos bots sem ferramentas explica as linhas e mostra as tarefas abertas (as do bot primeiro).
+        try store.createTask(title: "Do Jon", assignee: "jon", by: "jon")
+        let hint = TaskMarkers.botHint(botKey: "robb", tasks: try store.tasks(), store: store)
+        XCTAssertTrue(hint.contains("[TAREFA nova]"))
+        XCTAssertTrue(hint.contains("Revisar PR #4242"))
+        XCTAssertFalse(hint.contains("Atualizar o dashboard"))   // feita: fora da lista
+        let m = try store.post(sender: "jon", text: "@robb cria a tarefa")
+        let p = WakeContext.prompt(botName: "Robb", messages: [m], postReply: true, taskHint: hint)
+        XCTAssertTrue(p.contains("Quadro de tarefas do chat"))
+    }
+
     func testReservedAndEmpty() {
         XCTAssertThrowsError(try store.registerBot("todos"))
         XCTAssertThrowsError(try store.post(sender: "x", text: "   "))

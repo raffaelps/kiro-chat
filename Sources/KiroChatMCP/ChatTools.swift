@@ -124,6 +124,38 @@ final class ChatTools: @unchecked Sendable {
                     "topic": ["type": "string", "description": "Assunto do canal."],
                 ], required: ["name"]),
             ],
+            [
+                "name": "list_tasks",
+                "description": "Lista as tarefas do quadro (Kanban) do chat: backlog, andamento, aguardando e feito, com data e responsável.",
+                "inputSchema": schema([
+                    "status": ["type": "string", "description": "Só uma coluna: backlog, andamento, aguardando ou feito."],
+                    "assignee": ["type": "string", "description": "Só as tarefas deste responsável (ex: seu nome)."],
+                    "include_done": ["type": "boolean", "description": "Incluir as feitas (padrão: não)."],
+                ]),
+            ],
+            [
+                "name": "create_task",
+                "description": "Cria uma tarefa no quadro do chat. Começa em backlog, a não ser que você diga outro status.",
+                "inputSchema": schema([
+                    "title": ["type": "string", "description": "Título curto da tarefa."],
+                    "date": ["type": "string", "description": "Dia da tarefa: AAAA-MM-DD, DD/MM, hoje ou amanhã."],
+                    "assignee": ["type": "string", "description": "Responsável (nome de bot ou humano)."],
+                    "status": ["type": "string", "description": "backlog, andamento, aguardando ou feito."],
+                    "notes": ["type": "string", "description": "Detalhes."],
+                ], required: ["title"]),
+            ],
+            [
+                "name": "update_task",
+                "description": "Move uma tarefa de coluna (status) ou muda data, responsável, título ou notas. Para tirar data ou responsável, mande \"\".",
+                "inputSchema": schema([
+                    "id": ["type": "integer", "description": "Número da tarefa (#id)."],
+                    "status": ["type": "string", "description": "backlog, andamento, aguardando ou feito."],
+                    "date": ["type": "string"],
+                    "assignee": ["type": "string"],
+                    "title": ["type": "string"],
+                    "notes": ["type": "string"],
+                ], required: ["id"]),
+            ],
         ]
     }
 
@@ -142,6 +174,9 @@ final class ChatTools: @unchecked Sendable {
             case "list_bots": text = try listBots()
             case "list_channels": text = try listChannels()
             case "create_channel": text = try createChannel(a)
+            case "list_tasks": text = try listTasks(a)
+            case "create_task": text = try createTask(a)
+            case "update_task": text = try updateTask(a)
             default: throw ToolError("Ferramenta desconhecida: \(name)")
             }
             return ["content": [["type": "text", "text": text]], "isError": false]
@@ -301,6 +336,40 @@ final class ChatTools: @unchecked Sendable {
         let name = try store.createChannel(raw, topic: a.string("topic") ?? "")
         try store.post(channel: name, sender: "sistema", text: "📢 \(store.handle(for: bot)) criou o canal #\(name).", kind: .system)
         return "Canal #\(name) pronto." + footer(for: bot)
+    }
+
+    private func status(_ a: JSON) throws -> TaskStatus? {
+        guard let raw = a.string("status") else { return nil }
+        guard let s = TaskStatus.parse(raw) else {
+            throw ToolError("Status inválido: '\(raw)'. Use backlog, andamento, aguardando ou feito.")
+        }
+        return s
+    }
+
+    private func listTasks(_ a: JSON) throws -> String {
+        let bot = try me()
+        let list = try store.tasks(status: try status(a), assignee: a.string("assignee"),
+                                   includeDone: a.bool("include_done") ?? false)
+        let lines = list.map { TaskMarkers.describe($0, store: store) }
+        return (lines.isEmpty ? "Nenhuma tarefa." : "Tarefas:\n" + lines.joined(separator: "\n")) + footer(for: bot)
+    }
+
+    private func createTask(_ a: JSON) throws -> String {
+        let bot = try me()
+        let t = try store.createTask(title: a.string("title") ?? "", notes: a.string("notes") ?? "",
+                                     status: try status(a) ?? .backlog, assignee: a.string("assignee"),
+                                     due: a.string("date"), by: bot)
+        return "Tarefa criada: " + TaskMarkers.describe(t, store: store) + footer(for: bot)
+    }
+
+    private func updateTask(_ a: JSON) throws -> String {
+        let bot = try me()
+        guard let id = a.int("id") else { throw ToolError("Informe 'id'.") }
+        let patch = TaskPatch(title: a.string("title"), notes: a.string("notes"), status: try status(a),
+                              assignee: a.string("assignee"), due: a.string("date"))
+        guard !patch.isEmpty else { throw ToolError("Nada para mudar: informe status, date, assignee, title ou notes.") }
+        let t = try store.updateTask(id: Int64(id), patch, by: bot)
+        return "Tarefa atualizada: " + TaskMarkers.describe(t, store: store) + footer(for: bot)
     }
 
     /// Conversas diretas são privadas: só o bot delas pode ler ou escrever.

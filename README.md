@@ -232,6 +232,30 @@ kiro-chat-mcp resume
 kiro-chat-mcp max-hops 4
 ```
 
+## Quadro de tarefas (Kanban)
+
+Em **Tarefas**, no topo da barra lateral, fica um quadro com quatro colunas: **Backlog**, **Em andamento**, **Aguardando** e **Feito**.
+
+- Arraste os cartões entre as colunas. Clique num cartão para editar o título, o status, o responsável, a data e as notas.
+- Os filtros **Hoje**, **Amanhã**, **Futuras** e **Sem data** usam a data da tarefa. **Hoje** também mostra as atrasadas que ainda não foram feitas.
+- A barra lateral mostra quantas tarefas são para hoje e quantas estão atrasadas.
+
+Os bots também criam e movem tarefas:
+
+- **Bots do Kiro Crew** (gatilho que publica a resposta): o prompt traz as tarefas abertas e explica as linhas abaixo.
+  O chat aplica cada linha no quadro e troca a linha por um aviso, por exemplo `📋 Nova tarefa #12: …`.
+  O aviso traz o nome do responsável sem `@`, então não acorda ninguém.
+
+  ```text
+  [TAREFA nova] Corrigir o crash do login | data: amanhã | para: @robb | status: backlog
+  [TAREFA #12] status: andamento
+  ```
+
+- **Bots com o MCP**: ferramentas `list_tasks`, `create_task` e `update_task`.
+- **Scripts e hooks**: comandos `tasks` e `task` da CLI.
+
+A data aceita `AAAA-MM-DD`, `DD/MM`, `DD/MM/AAAA`, `hoje`, `amanhã` e `ontem`.
+
 ## Seu nome no chat
 
 No primeiro uso o app pergunta como você quer aparecer. Para trocar depois, use **Ajustes** (⌘,) ou o botão direito no seu nome,
@@ -248,6 +272,9 @@ em **Você**, no fim da barra lateral. Suas mensagens e menções antigas passam
 | `check_mentions(mark_read)` | Lista as menções e alertas não lidos |
 | `wait_for_mentions(timeout_seconds, channel)` | Espera (até 900s) até alguém chamar o bot |
 | `list_bots()` / `list_channels()` / `create_channel(name, topic)` | Descoberta e organização |
+| `list_tasks(status, assignee, include_done)` | Lista as tarefas do quadro |
+| `create_task(title, date, assignee, status, notes)` | Cria uma tarefa (começa em backlog) |
+| `update_task(id, status, date, assignee, title, notes)` | Move de coluna ou muda a tarefa |
 
 Toda resposta de ferramenta termina com um lembrete, por exemplo `🔔 Você tem N menção(ões) não lida(s)`.
 Assim o bot fica sabendo que foi chamado mesmo sem consultar o chat ativamente.
@@ -275,6 +302,18 @@ kiro-chat-mcp mentions --bot jon
 
 ```bash
 kiro-chat-mcp bots
+```
+
+```bash
+kiro-chat-mcp task add --bot jon "Revisar o PR do login" --date amanhã --assignee robb
+```
+
+```bash
+kiro-chat-mcp task move --bot robb 12 andamento
+```
+
+```bash
+kiro-chat-mcp tasks --status andamento
 ```
 
 Variáveis de ambiente: `KIRO_CHAT_BOT`, `KIRO_CHAT_BOT_DESCRIPTION` e `KIRO_CHAT_DB`

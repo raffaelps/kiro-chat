@@ -268,7 +268,8 @@ public enum WakeContext {
                 ou alterar arquivos, abrir tarefas, consultar sistemas com suas ferramentas), não tente agora: responda só com uma linha
                 \(FlowMarkers.execute) <o que você vai fazer, em poucas palavras>
                 e o Kiro Chat vai te chamar de novo pelo Kiro Crew, com suas ferramentas, para executar (pode precisar da \
-                aprovação de um humano). Se dá para responder sem executar nada, responda direto.
+                aprovação de um humano). Se dá para responder sem executar nada, responda direto. \
+                Criar ou mover tarefas no quadro do chat (linhas [TAREFA ...]) não é executar: escreva as linhas direto aqui.
                 """
             case .execute(let action):
                 return """
@@ -286,7 +287,8 @@ public enum WakeContext {
     /// `profile`: perfil do Bot no Kiro Crew (papel, objetivos...), que vai no começo do prompt.
     public static func prompt(botName: String, messages: [ChatMessage], postReply: Bool = false,
                               maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = [],
-                              profile: KiroCrew.Profile? = nil, stage: Stage = .reply) -> String {
+                              profile: KiroCrew.Profile? = nil, stage: Stage = .reply,
+                              taskHint: String? = nil) -> String {
         let intro = profile.flatMap { $0.isEmpty ? nil : $0.promptSection + "\n\n" } ?? ""
         var header: String
         if context.isEmpty {
@@ -352,14 +354,14 @@ public enum WakeContext {
 
             Sua resposta final será publicada automaticamente em #\(channel) como mensagem sua, em resposta a quem te chamou. \
             Escreva só o texto dessa mensagem, direto ao ponto. Não use ferramentas para enviar a resposta.
-            """ + stage.instructions + "\n\n" + Markdown.botHint + rules
+            """ + stage.instructions + "\n\n" + Markdown.botHint + (taskHint.map { "\n\n" + $0 } ?? "") + rules
         }
         return header + """
 
 
         Use as ferramentas do MCP kiro-chat: se ainda não tiver identidade, chame join_chat com o nome "\(botName)". \
         Leia o contexto com read_messages no canal da mensagem e responda com send_message no mesmo canal, \
-        usando reply_to com o id da mensagem.
+        usando reply_to com o id da mensagem. Quadro de tarefas do chat (Kanban): list_tasks, create_task e update_task.
         """ + "\n\n" + Markdown.botHint + rules
     }
 
@@ -367,12 +369,13 @@ public enum WakeContext {
     /// depois o briefing e, em último caso, o meio do texto (mantendo o começo e as instruções do fim).
     public static func fittedPrompt(botName: String, messages: [ChatMessage], postReply: Bool = false,
                                     maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = [],
-                                    profile: KiroCrew.Profile? = nil, stage: Stage = .reply, maxLength: Int) -> String {
+                                    profile: KiroCrew.Profile? = nil, stage: Stage = .reply,
+                                    taskHint: String? = nil, maxLength: Int) -> String {
         var ctx = context
         var prof = profile
         func build() -> String {
             prompt(botName: botName, messages: messages, postReply: postReply, maxHops: maxHops,
-                   context: ctx, profile: prof, stage: stage)
+                   context: ctx, profile: prof, stage: stage, taskHint: taskHint)
         }
         var p = build()
         while p.unicodeScalars.count > maxLength {
@@ -400,16 +403,17 @@ public enum WakeContext {
                                    databasePath: String, postReply: Bool = false,
                                    maxHops: Int = ChatStore.defaultMaxBotHops,
                                    context: [ChatMessage] = [], profile: KiroCrew.Profile? = nil,
-                                   stage: Stage = .reply, maxLength: Int? = nil) -> [String: String] {
+                                   stage: Stage = .reply, taskHint: String? = nil,
+                                   maxLength: Int? = nil) -> [String: String] {
         let last = messages.last
         return [
             "KIRO_CHAT_BOT": botName,
             "KIRO_CHAT_BOT_KEY": botKey,
             "KIRO_CHAT_PROMPT": maxLength.map {
                 fittedPrompt(botName: botName, messages: messages, postReply: postReply, maxHops: maxHops,
-                             context: context, profile: profile, stage: stage, maxLength: $0)
+                             context: context, profile: profile, stage: stage, taskHint: taskHint, maxLength: $0)
             } ?? prompt(botName: botName, messages: messages, postReply: postReply,
-                        maxHops: maxHops, context: context, profile: profile, stage: stage),
+                        maxHops: maxHops, context: context, profile: profile, stage: stage, taskHint: taskHint),
             "KIRO_CHAT_HOP": String((messages.map(\.hop).max() ?? 0) + 1),
             "KIRO_CHAT_FROM": last?.senderName ?? "",
             "KIRO_CHAT_CHANNEL": last?.channel ?? ChatNames.defaultChannel,
@@ -538,11 +542,14 @@ public final class WakeDispatcher: @unchecked Sendable {
             let hybrid = t.escalate && t.postReply && crewKey != nil && KiroCrew.mode(ofCommand: t.command) == .chat
             // O `kirocrew spawn` recusa tarefas longas: nele o prompt é encurtado até caber (com folga).
             let spawnLimit = KiroCrew.spawnTaskLimit - 200
+            // Quem publica pela resposta (sem ferramentas) mexe no quadro com linhas [TAREFA ...].
+            let taskHint = t.postReply ? TaskMarkers.botHint(botKey: t.bot, tasks: (try? self.store.tasks(includeDone: false)) ?? [],
+                                                             store: self.store) : nil
             let environment: @Sendable (WakeContext.Stage, Bool) -> [String: String] = { stage, viaSpawn in
                 WakeContext.environment(botKey: t.bot, botName: name, messages: messages,
                                         databasePath: self.store.url.path, postReply: t.postReply,
                                         maxHops: self.store.maxBotHops, context: context, profile: profile,
-                                        stage: stage, maxLength: viaSpawn ? spawnLimit : nil)
+                                        stage: stage, taskHint: taskHint, maxLength: viaSpawn ? spawnLimit : nil)
             }
             let env = environment(hybrid ? .triage : .reply, KiroCrew.mode(ofCommand: t.command) == .spawn)
             let waiting = Flag()
@@ -620,11 +627,13 @@ public final class WakeDispatcher: @unchecked Sendable {
         guard !isTest, let last = messages.last else {
             return "Resposta (teste, não publicada no chat):\n\(reply)" + footer
         }
+        // Linhas [TAREFA ...]: aplica no quadro e troca cada uma por um aviso.
+        let text = TaskMarkers.contains(reply) ? TaskMarkers.apply(in: reply, by: bot, store: store).text : reply
         do {
             let hop = (messages.map(\.hop).max() ?? 0) + 1
-            let m = try store.post(channel: last.channel, sender: bot, text: reply, replyTo: last.id, hop: hop)
+            let m = try store.post(channel: last.channel, sender: bot, text: text, replyTo: last.id, hop: hop)
             try store.markMentionsRead(for: bot, messageIds: messages.map(\.id))
-            return "Resposta publicada como #\(m.id) em #\(m.channel):\n\(reply)" + footer
+            return "Resposta publicada como #\(m.id) em #\(m.channel):\n\(text)" + footer
         } catch {
             return "(erro ao publicar a resposta: \(error))"
         }

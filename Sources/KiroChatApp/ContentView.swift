@@ -18,7 +18,9 @@ struct ContentView: View {
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Group {
-                if let channel = model.selectedChannel {
+                if model.showBoard {
+                    TaskBoardView(showSidebar: $showSidebar)
+                } else if let channel = model.selectedChannel {
                     ChannelView(channel: channel, showSidebar: $showSidebar)
                 } else {
                     ContentUnavailableView("Escolha um canal", systemImage: "number")
@@ -51,6 +53,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showNamePrompt) {
             NameSheet(firstRun: !model.hasChosenName).environmentObject(model)
+        }
+        .sheet(item: $model.taskEditor) { request in
+            TaskSheet(request: request).environmentObject(model)
         }
         .sheet(item: $model.triggerSheetBot) { bot in
             TriggerSheet(bot: bot, existing: model.trigger(for: bot.name)).environmentObject(model)
@@ -161,6 +166,8 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
+                    TasksRow().padding(.top, 8)
+
                     SectionTitle(title: "Canais") {
                         Button { model.showNewChannel = true } label: { Image(systemName: "plus") }
                             .buttonStyle(.plain)
@@ -193,7 +200,7 @@ struct Sidebar: View {
     }
 
     private func channelRow(_ c: ChannelInfo) -> some View {
-        SidebarRow(selected: model.selectedChannel == c.name, action: { model.selectedChannel = c.name }) {
+        SidebarRow(selected: !model.showBoard && model.selectedChannel == c.name, action: { model.open(channel: c.name) }) {
             HStack(spacing: 10) {
                 Image(systemName: c.isOpen ? "megaphone.fill" : "number")
                     .font(.system(size: 12, weight: .semibold))
@@ -223,8 +230,8 @@ struct Sidebar: View {
     private func botRow(_ bot: BotInfo) -> some View {
         let dm = bot.directChannel
         let hasDM = model.channels.contains { $0.name == dm }
-        return SidebarRow(selected: !bot.isHuman && model.selectedChannel == dm,
-                          action: bot.isHuman ? nil : { model.selectedChannel = dm }) {
+        return SidebarRow(selected: !bot.isHuman && !model.showBoard && model.selectedChannel == dm,
+                          action: bot.isHuman ? nil : { model.open(channel: dm) }) {
             HStack(spacing: 10) {
                 BotRow(bot: bot)
                 Spacer(minLength: 0)

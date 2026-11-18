@@ -46,6 +46,12 @@ if options["help"] != nil || positional.first == "help" {
       kiro-chat-mcp mentions --bot coder
       kiro-chat-mcp bots
 
+    Quadro de tarefas (Kanban: backlog, andamento, aguardando, feito):
+      kiro-chat-mcp tasks [--status andamento] [--assignee jon] [--all]
+      kiro-chat-mcp task add --bot jon "título" [--date amanhã] [--assignee robb] [--status backlog] [--notes "..."]
+      kiro-chat-mcp task move --bot jon 12 andamento
+      kiro-chat-mcp task update --bot jon 12 [--date 20/11] [--assignee robb] [--title "..."] [--notes "..."]
+
     Gatilhos (acordar um bot quando ele for mencionado, sem gastar tokens esperando):
       kiro-chat-mcp trigger --bot jon --command 'kiro-cli chat --no-interactive --agent jon "$KIRO_CHAT_PROMPT"'
       kiro-chat-mcp trigger --bot jon --url https://exemplo/webhook [--delay 3] [--max-per-hour 30]
@@ -130,6 +136,47 @@ do {
 
     case "bots":
         print(ChatFormat.bots(try store.listBots()))
+
+    case "tasks":
+        let status = try options["status"].map { raw -> TaskStatus in
+            guard let s = TaskStatus.parse(raw) else { fail("Status inválido: \(raw). Use backlog, andamento, aguardando ou feito.") }
+            return s
+        }
+        let list = try store.tasks(status: status, assignee: options["assignee"], includeDone: options["all"] != nil)
+        print(list.isEmpty ? "Nenhuma tarefa." : list.map { TaskMarkers.describe($0, store: store) }.joined(separator: "\n"))
+
+    case "task":
+        let bot = requireBot()
+        let args = Array(positional.dropFirst(2))
+        func status(_ raw: String?) -> TaskStatus? {
+            guard let raw else { return nil }
+            guard let s = TaskStatus.parse(raw) else { fail("Status inválido: \(raw). Use backlog, andamento, aguardando ou feito.") }
+            return s
+        }
+        func taskId() -> Int64 {
+            guard let first = args.first, let id = Int64(first.trimmingCharacters(in: CharacterSet(charactersIn: "#"))) else {
+                fail("Informe o número da tarefa.")
+            }
+            return id
+        }
+        let t: ChatTask
+        switch positional.dropFirst().first {
+        case "add":
+            t = try store.createTask(title: args.joined(separator: " "), notes: options["notes"] ?? "",
+                                     status: status(options["status"]) ?? .backlog, assignee: options["assignee"],
+                                     due: options["date"], by: bot)
+        case "move":
+            guard let s = status(args.dropFirst().first ?? options["status"]) else { fail("Informe o status: backlog, andamento, aguardando ou feito.") }
+            t = try store.updateTask(id: taskId(), TaskPatch(status: s), by: bot)
+        case "update":
+            let patch = TaskPatch(title: options["title"], notes: options["notes"], status: status(options["status"]),
+                                  assignee: options["assignee"], due: options["date"])
+            guard !patch.isEmpty else { fail("Nada para mudar: use --status, --date, --assignee, --title ou --notes.") }
+            t = try store.updateTask(id: taskId(), patch, by: bot)
+        default:
+            fail("Use: task add | task move | task update (veja --help).")
+        }
+        print(TaskMarkers.describe(t, store: store))
 
     case "stop", "resume":
         let paused = positional.first == "stop"

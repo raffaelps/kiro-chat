@@ -97,6 +97,8 @@ public final class ChatStore: @unchecked Sendable {
         try migrateWake()
         // v4: controle de fluxo (trocas seguidas entre bots, pausa geral).
         try migrateFlow()
+        // v6: quadro de tarefas (Kanban).
+        try migrateTasks()
     }
 
     // MARK: - Bots
