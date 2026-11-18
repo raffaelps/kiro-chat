@@ -50,6 +50,7 @@ if options["help"] != nil || positional.first == "help" {
       kiro-chat-mcp trigger --bot jon --command 'kiro-cli chat --no-interactive --agent jon "$KIRO_CHAT_PROMPT"'
       kiro-chat-mcp trigger --bot jon --url https://exemplo/webhook [--delay 3] [--max-per-hour 30]
       kiro-chat-mcp trigger --bot jon --kirocrew [CHAVE]   → acorda o Bot do Kiro Crew e publica a resposta
+          [--mode hybrid|spawn|chat]                        hybrid (padrão): rápido, e pelo Kiro Crew quando precisa agir
       kiro-chat-mcp trigger --bot jon --test | --off | --on | --remove | --post-reply on|off
       kiro-chat-mcp kirocrew-bots                 → Bots do Kiro Crew e a chave de cada um
       kiro-chat-mcp triggers                      → lista gatilhos e últimos disparos
@@ -204,17 +205,22 @@ do {
             fail("Teste ainda rodando depois de 120s.")
         }
         var t = try store.trigger(for: key) ?? WakeTrigger(bot: key)
-        if let c = options["command"] { t.kind = .command; t.command = c }
+        if let c = options["command"] { t.kind = .command; t.command = c; t.escalate = false }
         if let k = options["kirocrew"] {
             guard KiroCrew.isInstalled else { fail("Kiro Crew não encontrado nesta máquina.") }
             let bots = KiroCrew.bots()
             guard let crewBot = k == "true" ? KiroCrew.match(for: key, in: bots) : bots.first(where: { $0.key == k }) else {
                 fail("Não achei o Bot do Kiro Crew. Veja as chaves com `kiro-chat-mcp kirocrew-bots` e use --kirocrew CHAVE.")
             }
-            t.kind = .command
-            t.command = KiroCrew.command(for: crewBot)
-            t.postReply = true
-            print("Bot do Kiro Crew: \(crewBot.label) (chave \(crewBot.key))")
+            let mode: KiroCrew.Mode
+            switch options["mode"]?.lowercased() {
+            case nil, "hybrid", "hibrido", "híbrido": mode = .hybrid
+            case "spawn": mode = .spawn
+            case "chat": mode = .chat
+            default: fail("--mode deve ser hybrid, spawn ou chat.")
+            }
+            KiroCrew.configure(&t, bot: crewBot, mode: mode)
+            print("Bot do Kiro Crew: \(crewBot.label) (chave \(crewBot.key), modo \(mode.rawValue))")
         }
         if let pr = options["post-reply"] { t.postReply = !["off", "false", "0", "nao", "não"].contains(pr.lowercased()) }
         if let u = options["url"] { t.kind = .webhook; t.url = u }

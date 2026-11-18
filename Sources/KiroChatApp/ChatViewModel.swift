@@ -112,13 +112,9 @@ final class ChatViewModel: ObservableObject {
                     try store.markMentionsRead(for: me, messageIds: fresh.filter { $0.mentions.contains(me) }.map(\.id))
                 }
             }
-            if channels.first(where: { $0.name == selectedChannel })?.isOpen == true {
-                let ids = messages.suffix(200).filter { $0.sender == me }.map(\.id)
-                let fresh = try store.listeners(for: ids)
-                if fresh != listeners { listeners = fresh }
-            } else if !listeners.isEmpty {
-                listeners = [:]
-            }
+            // Quem foi chamado em cada mensagem: respondendo, aguardando aprovação, ouviu sem responder...
+            let fresh = try store.listeners(for: messages.suffix(200).map(\.id))
+            if fresh != listeners { listeners = fresh }
             let newUnread = try store.unreadCounts(for: me)
             if newUnread != unread { unread = newUnread }
             try notifyIfNeeded()
@@ -367,7 +363,7 @@ final class ChatViewModel: ObservableObject {
     /// Coloca Bots do Kiro Crew no chat, com o primeiro nome deles, e cria o gatilho que os acorda
     /// (sem mexer em gatilhos que já existem). Retorna os nomes adicionados.
     @discardableResult
-    func addCrewBots(_ crew: [KiroCrew.Bot], withTrigger: Bool) -> [String] {
+    func addCrewBots(_ crew: [KiroCrew.Bot], withTrigger: Bool, mode: KiroCrew.Mode = .hybrid) -> [String] {
         guard let store else { return [] }
         var added: [String] = []
         for b in crew {
@@ -375,7 +371,9 @@ final class ChatViewModel: ObservableObject {
                 let desc = b.description.isEmpty ? b.label : b.description
                 let info = try store.registerBot(KiroCrew.chatName(for: b), description: desc)
                 if withTrigger, try store.trigger(for: info.name) == nil {
-                    try store.saveTrigger(WakeTrigger(bot: info.name, command: KiroCrew.command(for: b), postReply: true))
+                    var t = WakeTrigger(bot: info.name)
+                    KiroCrew.configure(&t, bot: b, mode: mode)
+                    try store.saveTrigger(t)
                 }
                 added.append(info.displayName)
             } catch {

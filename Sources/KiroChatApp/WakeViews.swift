@@ -137,6 +137,7 @@ struct TriggerSheet: View {
     @State private var logs: [WakeLogEntry] = []
     @State private var crewBots: [KiroCrew.Bot] = []
     @State private var crewKey = ""
+    @State private var crewMode: KiroCrew.Mode = .hybrid
     @State private var expandedLogs = Set<Int64>()
 
     init(bot: BotInfo, existing: WakeTrigger?) {
@@ -145,15 +146,22 @@ struct TriggerSheet: View {
         var initial = existing ?? WakeTrigger(bot: bot.name, enabled: true)
         // Novo gatilho: se houver um Bot do Kiro Crew com o mesmo nome, já vem configurado.
         if existing == nil, KiroCrew.isInstalled, let match = KiroCrew.match(for: bot.name) {
-            initial.command = KiroCrew.command(for: match)
-            initial.postReply = true
+            KiroCrew.configure(&initial, bot: match, mode: .hybrid)
         }
         _t = State(initialValue: initial)
     }
 
     /// Bot do Kiro Crew que o comando atual aciona (para mostrar no seletor).
     private func crewKey(in command: String) -> String {
-        crewBots.first { KiroCrew.command(for: $0) == command }?.key ?? ""
+        guard let key = KiroCrew.agentKey(inCommand: command) else { return "" }
+        return crewBots.first { $0.key == key }?.key ?? ""
+    }
+
+    private func applyCrewBot() {
+        guard let b = crewBots.first(where: { $0.key == crewKey }) else { return }
+        var updated = t
+        KiroCrew.configure(&updated, bot: b, mode: crewMode)
+        if updated != t { t = updated }
     }
 
     private static let variables: [(String, String)] = [
@@ -210,14 +218,14 @@ struct TriggerSheet: View {
                         }
                         .labelsHidden()
                         .frame(maxWidth: 280)
-                        .onChange(of: crewKey) {
-                            guard let b = crewBots.first(where: { $0.key == crewKey }) else { return }
-                            t.command = KiroCrew.command(for: b)
-                            t.postReply = true
-                        }
+                        .onChange(of: crewKey) { applyCrewBot() }
                         Spacer()
                     }
                     .help("Monta o comando com a chave interna do Bot (o nome exibido, como \"Jon - Chief\", não funciona em --agent).")
+                    if !crewKey.isEmpty {
+                        CrewModePicker(mode: $crewMode)
+                            .onChange(of: crewMode) { applyCrewBot() }
+                    }
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -323,8 +331,13 @@ struct TriggerSheet: View {
             logs = model.wakeLogs(bot: bot.name)
             crewBots = KiroCrew.isInstalled ? KiroCrew.bots() : []
             crewKey = crewKey(in: t.command)
+            crewMode = KiroCrew.mode(of: t) ?? .hybrid
         }
-        .onChange(of: t.command) { crewKey = crewKey(in: t.command) }
+        .onChange(of: t.command) {
+            crewKey = crewKey(in: t.command)
+            if crewKey.isEmpty { t.escalate = false }
+            if let m = KiroCrew.mode(of: t), m != crewMode { crewMode = m }
+        }
         .onChange(of: model.now) { logs = model.wakeLogs(bot: bot.name) }
     }
 

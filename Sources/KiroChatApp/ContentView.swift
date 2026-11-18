@@ -383,7 +383,7 @@ struct ChannelHeader: View {
     private var subtitle: String {
         if let bot = dmBot {
             let status = bot.isOnline(now: model.now) ? "online"
-                : bot.lastSeen.map { "visto \($0.formatted(.relative(presentation: .named)))" } ?? "offline"
+                : bot.lastSeen.map { "visto \($0.formatted(.relative(presentation: .named).locale(Theme.locale)))" } ?? "offline"
             return "Conversa direta · \(status)"
         }
         if info?.isOpen == true { return "Canal aberto · todos os bots escutam" }
@@ -565,9 +565,7 @@ struct MessageRow: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Theme.warning)
             }
-            Text(MessageText.render(message.text, me: model.me, handles: model.handles, onAccent: true))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            MessageBody(text: message.text, me: model.me, handles: model.handles, onAccent: true)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -600,9 +598,7 @@ struct MessageRow: View {
                         }
                     }
                 }
-                Text(MessageText.render(message.text, me: model.me, handles: model.handles))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MessageBody(text: message.text, me: model.me, handles: model.handles)
                     .lineSpacing(2)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -610,6 +606,7 @@ struct MessageRow: View {
                                stroke: isAlert ? Theme.warning.opacity(0.5)
                                    : mentionsMe ? Theme.accent.opacity(0.7) : Theme.stroke)
                 meta
+                ListenerStatus(messageId: message.id)
             }
             Spacer(minLength: 60)
         }
@@ -625,6 +622,15 @@ struct ListenerStatus: View {
     var body: some View {
         if let l = model.listeners[messageId], !l.isEmpty {
             HStack(spacing: 10) {
+                if !l.awaitingApproval.isEmpty {
+                    Label("Aprovar no Kiro Crew: " + l.awaitingApproval.joined(separator: ", "), systemImage: "checkmark.shield")
+                        .foregroundStyle(Theme.warning)
+                        .help("O Kiro Crew pediu aprovação para o Bot rodar: abra o painel do Kiro Crew → Approvals. Depois de aprovado, o Bot trabalha e responde aqui.")
+                }
+                if !l.executing.isEmpty {
+                    Label("Executando no Kiro Crew: " + l.executing.joined(separator: ", "), systemImage: "hammer")
+                        .help("O Bot pediu para executar uma ação e está rodando pelo Kiro Crew, com as ferramentas dele.")
+                }
                 if !l.answering.isEmpty {
                     Label("Respondendo: " + l.answering.joined(separator: ", "), systemImage: "ellipsis.bubble")
                 }
@@ -653,6 +659,11 @@ enum MessageText {
     static func render(_ text: String, me: String, handles: [String: String] = [:], onAccent: Bool = false) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
+        // `código` inline: fonte monoespaçada (já vem do Markdown) com um fundo leve.
+        for run in attr.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            attr[run.range].backgroundColor = onAccent ? Color.black.opacity(0.22) : Color.white.opacity(0.09)
+            if !onAccent { attr[run.range].foregroundColor = Color(red: 0.86, green: 0.78, blue: 1.0) }
+        }
         let plain = String(attr.characters)
         guard let regex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_.-])@[A-Za-z0-9_][A-Za-z0-9_.-]*"#) else { return attr }
         let ns = plain as NSString
@@ -918,49 +929,152 @@ struct SettingsView: View {
     @State private var nameDraft = ""
     @State private var nameError: String?
 
+    private var nameChanged: Bool {
+        !ChatNames.normalize(nameDraft).isEmpty && ChatNames.displayName(fromRaw: nameDraft) != model.humanName
+    }
+
     var body: some View {
-        Form {
-            HStack {
-                TextField("Seu nome no chat", text: $nameDraft)
-                    .onSubmit { nameError = model.setHumanName(nameDraft) }
-                Button("Salvar") { nameError = model.setHumanName(nameDraft) }
-                    .disabled(ChatNames.displayName(fromRaw: nameDraft) == model.humanName)
-            }
-            if let nameError { Text(nameError).font(.caption).foregroundStyle(.red) }
-            Toggle(isOn: Binding(get: { model.backgroundDispatch }, set: { model.setBackgroundDispatch($0) })) {
-                VStack(alignment: .leading) {
-                    Text("Disparar gatilhos com o app fechado")
-                    Text("Instala um serviço leve em segundo plano (LaunchAgent) que acorda os bots quando forem mencionados.")
-                        .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsSection("Você") {
+                SettingsRow("Seu nome no chat", detail: "Como os bots e as menções te veem (@\(model.humanName)).") {
+                    HStack(spacing: 8) {
+                        TextField("Nome", text: $nameDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 150)
+                            .onSubmit { if nameChanged { nameError = model.setHumanName(nameDraft) } }
+                        Button("Salvar") { nameError = model.setHumanName(nameDraft) }
+                            .disabled(!nameChanged)
+                    }
+                }
+                if let nameError {
+                    Text(nameError).font(.caption).foregroundStyle(.red)
+                }
+                SettingsDivider()
+                SettingsRow("Notificações", detail: "Avisar quando eu for mencionado ou houver um alerta.") {
+                    Toggle("", isOn: $model.notificationsEnabled).labelsHidden().toggleStyle(.switch)
                 }
             }
-            Stepper(value: Binding(get: { model.maxBotHops }, set: { model.setMaxBotHops($0) }), in: 1...50) {
-                VStack(alignment: .leading) {
-                    Text("Máximo de trocas seguidas entre bots: \(model.maxBotHops)")
-                    Text("Depois disso, menções entre bots não acordam ninguém até um humano escrever. Evita conversas sem fim.")
-                        .font(.caption).foregroundStyle(.secondary)
+
+            SettingsSection("Bots") {
+                SettingsRow("Disparar gatilhos com o app fechado",
+                            detail: "Instala um serviço leve em segundo plano (LaunchAgent) que acorda os bots quando forem mencionados.") {
+                    Toggle("", isOn: Binding(get: { model.backgroundDispatch }, set: { model.setBackgroundDispatch($0) }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                SettingsDivider()
+                SettingsRow("Trocas seguidas entre bots",
+                            detail: "Depois disso, menções entre bots não acordam ninguém até um humano escrever. Evita conversas sem fim.") {
+                    HStack(spacing: 6) {
+                        Text("\(model.maxBotHops)")
+                            .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                            .frame(minWidth: 22, alignment: .trailing)
+                        Stepper("", value: Binding(get: { model.maxBotHops }, set: { model.setMaxBotHops($0) }), in: 1...50)
+                            .labelsHidden()
+                    }
                 }
             }
-            Toggle("Notificar quando eu for mencionado ou houver alerta", isOn: $model.notificationsEnabled)
-            LabeledContent("Banco de dados") {
-                Text(model.databasePath).textSelection(.enabled).font(.caption.monospaced())
-            }
-            Section("Atualizações") {
-                LabeledContent("Versão instalada", value: updater.currentVersion)
-                Toggle("Procurar versões novas automaticamente", isOn: $updater.autoCheck)
-                HStack {
+
+            SettingsSection("Atualizações") {
+                SettingsRow("Versão instalada", detail: updateStatus) {
                     Button("Verificar agora") { updater.check(userInitiated: true) }
-                    if let r = updater.available {
-                        Text("Versão \(r.version) disponível").foregroundStyle(Theme.accent)
-                    } else if let d = updater.lastChecked {
-                        Text("Verificado \(d.formatted(.relative(presentation: .named)))")
-                            .font(.caption).foregroundStyle(.secondary)
+                }
+                SettingsDivider()
+                SettingsRow("Procurar versões novas automaticamente", detail: "Ao abrir o app e a cada 6 horas.") {
+                    Toggle("", isOn: $updater.autoCheck).labelsHidden().toggleStyle(.switch)
+                }
+            }
+
+            SettingsSection("Dados") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Banco de dados").font(.system(size: 13, weight: .medium))
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(model.databasePath)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.secondaryText)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Mostrar no Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: model.databasePath)])
+                        }
+                        .controlSize(.small)
                     }
                 }
             }
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(22)
+        .frame(width: 540)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Theme.background)
         .onAppear { nameDraft = model.humanName }
     }
+
+    private var updateStatus: String {
+        var parts = ["Kiro Chat \(updater.currentVersion)"]
+        if let r = updater.available {
+            parts.append("versão \(r.version) disponível")
+        } else if let d = updater.lastChecked {
+            parts.append("verificado \(d.formatted(.relative(presentation: .named).locale(Theme.locale)))")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Grupo de ajustes: título pequeno em cima e um cartão com as linhas.
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.tertiaryText)
+                .padding(.leading, 4)
+            VStack(alignment: .leading, spacing: 12) { content }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .themeCard(Theme.panel)
+        }
+    }
+}
+
+/// Uma linha de ajuste: título e explicação à esquerda, controle à direita.
+private struct SettingsRow<Control: View>: View {
+    let title: String
+    var detail: String?
+    @ViewBuilder var control: Control
+
+    init(_ title: String, detail: String? = nil, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.detail = detail
+        self.control = control()
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            control.fixedSize()
+        }
+    }
+}
+
+private struct SettingsDivider: View {
+    var body: some View { Rectangle().fill(Theme.stroke).frame(height: 1) }
 }

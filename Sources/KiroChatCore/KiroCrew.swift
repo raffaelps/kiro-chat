@@ -75,9 +75,70 @@ public enum KiroCrew {
         return bots.first { firstWord($0.label) == key || firstWord($0.key) == key }
     }
 
+    /// Como o gatilho roda o Bot.
+    public enum Mode: String, CaseIterable, Identifiable, Sendable {
+        /// Responde pelo modo rápido e, quando precisa agir, executa pelo Kiro Crew (`spawn`).
+        case hybrid
+        /// `kirocrew spawn run --crew`: roda pelo Kiro Crew como o Bot, com a memória dele e as ferramentas
+        /// do Kiro Crew (tarefas, cron, arquivos, shell, web). Aparece no painel e pode pedir aprovação.
+        case spawn
+        /// `kirocrew chat --agent`: execução avulsa e rápida, só com as ferramentas já liberadas no agente.
+        case chat
+
+        public var id: String { rawValue }
+        public var label: String {
+            switch self {
+            case .hybrid: return "Híbrido"
+            case .spawn: return "Sempre pelo Kiro Crew"
+            case .chat: return "Só resposta rápida"
+            }
+        }
+        public var detail: String {
+            switch self {
+            case .hybrid:
+                return "Conversa pelo modo rápido, sem aprovação. Quando precisa executar algo (build, arquivos, tarefas), o Bot é chamado de novo pelo Kiro Crew, com a memória e as ferramentas dele; só aí pode pedir aprovação em Approvals."
+            case .spawn:
+                return "Toda chamada roda pelo Kiro Crew como o Bot, com a memória dele e as ferramentas do Kiro Crew; pode executar ações. Aparece no painel e pode pedir aprovação em Approvals a cada chamada."
+            case .chat:
+                return "Execução avulsa, fora da sessão do Bot e sem a memória dele. Só usa as ferramentas já liberadas no agente; o que pedir permissão é negado."
+            }
+        }
+    }
+
+    /// Tamanho máximo da tarefa que o `kirocrew spawn` aceita (caracteres). Acima disso ele recusa.
+    public static let spawnTaskLimit = 5_000
+
+    /// Texto que o `kirocrew spawn` escreve enquanto espera aprovação no painel.
+    public static let approvalWaitMarker = "Waiting for spawn approval"
+
     /// Comando de gatilho que acorda o Bot e imprime a resposta dele.
-    public static func command(for bot: Bot, binary: String? = binaryPath) -> String {
-        "\(shellQuote(binary ?? "kirocrew")) chat --agent \(shellQuote(bot.key)) -m \"$KIRO_CHAT_PROMPT\""
+    public static func command(for bot: Bot, binary: String? = binaryPath, mode: Mode = .chat) -> String {
+        let exe = shellQuote(binary ?? "kirocrew")
+        switch mode {
+        case .chat, .hybrid: return "\(exe) chat --agent \(shellQuote(bot.key)) -m \"$KIRO_CHAT_PROMPT\""
+        case .spawn: return "\(exe) spawn run --crew \(shellQuote(bot.key)) \"$KIRO_CHAT_PROMPT\""
+        }
+    }
+
+    /// Modo de um gatilho do Kiro Crew (nil se não for um).
+    public static func mode(of trigger: WakeTrigger) -> Mode? {
+        guard trigger.kind == .command, let m = mode(ofCommand: trigger.command) else { return nil }
+        return m == .chat && trigger.escalate ? .hybrid : m
+    }
+
+    /// Configura o gatilho para acordar o Bot no modo escolhido (e publicar a resposta dele).
+    public static func configure(_ trigger: inout WakeTrigger, bot: Bot, mode: Mode, binary: String? = binaryPath) {
+        trigger.kind = .command
+        trigger.command = command(for: bot, binary: binary, mode: mode)
+        trigger.escalate = mode == .hybrid
+        trigger.postReply = true
+    }
+
+    /// Modo de um comando de gatilho do Kiro Crew (nil se não for um).
+    /// Só pelo comando não dá para saber se é híbrido: use `mode(of:)` com o gatilho.
+    public static func mode(ofCommand command: String) -> Mode? {
+        guard agentKey(inCommand: command) != nil else { return nil }
+        return command.range(of: #"kirocrew'?\s+spawn\s"#, options: .regularExpression) != nil ? .spawn : .chat
     }
 
     // MARK: - Perfil do Bot
@@ -100,6 +161,28 @@ public enum KiroCrew {
 
         public var isEmpty: Bool { role.isEmpty && goals.isEmpty && briefing.isEmpty }
 
+        /// O que há no primeiro nível da pasta de trabalho (só nomes; pastas com "/").
+        static func listing(of dir: URL, limit: Int = 25) -> String {
+            let fm = FileManager.default
+            guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return "Conteúdo: (não consegui ler a pasta)" }
+            let visible = names.filter { !$0.hasPrefix(".") }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            guard !visible.isEmpty else { return "Conteúdo agora: a pasta está vazia." }
+            let shown = visible.prefix(limit).map { name -> String in
+                var isDir: ObjCBool = false
+                fm.fileExists(atPath: dir.appendingPathComponent(name).path, isDirectory: &isDir)
+                return isDir.boolValue ? name + "/" : name
+            }
+            let more = visible.count > limit ? " (e mais \(visible.count - limit))" : ""
+            return "Conteúdo agora (estado atual da pasta; vale mais que o briefing): " + shown.joined(separator: ", ") + more
+        }
+
+        /// O mesmo perfil com o briefing encurtado (para caber no limite do `spawn`).
+        func shorteningBriefing(to n: Int) -> Profile {
+            guard briefing.count > n else { return self }
+            return Profile(key: key, displayName: displayName, role: role, goals: goals,
+                           briefing: String(briefing.prefix(n)) + " …(cortado)", workspace: workspace)
+        }
+
         /// Bloco de texto com o perfil, para o prompt.
         public var promptSection: String {
             var lines = ["Seu perfil no Kiro Crew (é assim que você foi configurado; responda nesse papel):"]
@@ -108,6 +191,10 @@ public enum KiroCrew {
             if !goals.isEmpty {
                 lines.append("- Objetivos:")
                 lines += goals.map { "  • \($0)" }
+            }
+            if let workspace {
+                lines.append("- Sua pasta de trabalho no Kiro Crew: \(workspace.path) (trabalhe nela; você pode estar rodando em outra pasta)")
+                lines.append("  " + Self.listing(of: workspace))
             }
             if !briefing.isEmpty {
                 lines.append("- Briefing atual:")
@@ -162,9 +249,10 @@ public enum KiroCrew {
                        briefing: briefing, workspace: workspace)
     }
 
-    /// Chave do Bot num comando de gatilho do Kiro Crew (`kirocrew chat --agent <chave> ...`).
+    /// Chave do Bot num comando de gatilho do Kiro Crew
+    /// (`kirocrew chat --agent <chave> ...` ou `kirocrew spawn run --crew <chave> ...`).
     public static func agentKey(inCommand command: String) -> String? {
-        let pattern = #"kirocrew'?\s+chat\s+(?:.*?\s)?--agent(?:\s+|=)(?:'([^']*)'|"([^"]*)"|([^\s'";|&)]+))"#
+        let pattern = #"kirocrew'?\s+(?:chat\s+(?:.*?\s)?--agent|spawn\s+(?:.*?\s)?run\s+(?:.*?\s)?--crew)(?:\s+|=)(?:'([^']*)'|"([^"]*)"|([^\s'";|&)]+))"#
         guard let re = try? NSRegularExpression(pattern: pattern),
               let m = re.firstMatch(in: command, range: NSRange(command.startIndex..., in: command)) else { return nil }
         for i in 1...3 {

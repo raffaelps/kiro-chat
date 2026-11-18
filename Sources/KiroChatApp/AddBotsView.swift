@@ -9,6 +9,7 @@ struct AddBotsView: View {
     @State private var crewBots: [KiroCrew.Bot] = []
     @State private var selected = Set<String>()
     @State private var withTrigger = true
+    @State private var mode: KiroCrew.Mode = .hybrid
     @State private var otherName = ""
     @State private var otherDescription = ""
     @State private var otherError: String?
@@ -91,11 +92,12 @@ struct AddBotsView: View {
 
                 Toggle("Criar gatilho de chamada (acorda o Bot quando for mencionado)", isOn: $withTrigger)
                     .help("Gatilhos que já existem não são alterados.")
+                if withTrigger { CrewModePicker(mode: $mode) }
 
                 HStack {
                     Spacer()
                     Button("Adicionar \(selected.count) bot(s)") {
-                        let added = model.addCrewBots(crewBots.filter { selected.contains($0.key) }, withTrigger: withTrigger)
+                        let added = model.addCrewBots(crewBots.filter { selected.contains($0.key) }, withTrigger: withTrigger, mode: mode)
                         if !added.isEmpty {
                             done = "Prontos no chat: " + added.map { "@\($0)" }.joined(separator: ", ")
                             selected.removeAll()
@@ -138,6 +140,25 @@ struct AddBotsView: View {
             if let otherError {
                 Text(otherError).font(.caption).foregroundStyle(.red)
             }
+        }
+    }
+}
+
+/// Escolhe como o gatilho roda um Bot do Kiro Crew.
+struct CrewModePicker: View {
+    @Binding var mode: KiroCrew.Mode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Rodar o Bot", selection: $mode) {
+                ForEach(KiroCrew.Mode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            Text(mode.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

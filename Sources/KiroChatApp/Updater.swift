@@ -277,7 +277,7 @@ struct UpdateSheet: View {
 
     @ViewBuilder private func available(_ r: AppUpdate.Release) -> some View {
         Text("Kiro Chat \(r.version) disponível").font(.title2.bold())
-        Text("Você tem a versão \(updater.currentVersion).\(r.publishedAt.map { " Publicada \($0.formatted(.relative(presentation: .named)))." } ?? "")")
+        Text("Você tem a versão \(updater.currentVersion).\(r.publishedAt.map { " Publicada \($0.formatted(.relative(presentation: .named).locale(Theme.locale)))." } ?? "")")
             .foregroundStyle(Theme.secondaryText)
         if !r.notes.isEmpty {
             ScrollView {

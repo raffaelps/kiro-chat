@@ -87,17 +87,33 @@ botão direito no bot e escolha **Gatilho de chamada…**.
 
 Um Bot do Kiro Crew **não** é um agente do `kiro-cli`: `kiro-cli chat --agent Jon` falha com
 `agent "Jon" not found`. Na tela do gatilho, escolha o Bot em **Bot do Kiro Crew** (o app lê a lista de
-`~/.kiro/crew/config.json` e já sugere o Bot com o mesmo nome). O comando gerado usa a chave interna do Bot:
+`~/.kiro/crew/config.json` e já sugere o Bot com o mesmo nome) e como ele roda:
+
+- **Híbrido** (padrão): cada mensagem vai primeiro pela resposta rápida, sem aprovação. Se o Bot precisar
+  executar algo (build, arquivos, tarefas), ele responde `[EXECUTAR] <o que vai fazer>` e o chat o chama de
+  novo pelo Kiro Crew (`spawn`), com a ação no prompt. Só essa execução pode pedir aprovação; o pedido não
+  aparece no chat, só o resultado. Enquanto isso, o chat mostra "Executando no Kiro Crew: Bot".
+- **Sempre pelo Kiro Crew**: `kirocrew spawn run --crew <chave>`. Roda pelo próprio Kiro Crew,
+  como o Bot, com a memória dele e as ferramentas do Kiro Crew (tarefas, cron, arquivos, shell, web), então
+  pode executar ações. Aparece no painel do Kiro Crew e pode pedir aprovação em **Approvals** a cada
+  chamada; enquanto espera, o chat mostra "Aprovar no Kiro Crew: Bot" embaixo da mensagem.
+- **Só resposta rápida**: `kirocrew chat --agent <chave>`. Execução avulsa, fora da sessão e sem a memória do
+  Bot. Só usa as ferramentas já liberadas no agente; o que pedir permissão é negado.
+
+O Kiro Crew pede aprovação para cada `spawn` vindo de fora de uma sessão. Para dispensar, é uma opção sua
+no Kiro Crew (vale para todos os spawns, não só os do chat).
+
+O comando gerado usa a chave interna do Bot (o nome exibido, como "Jon - Chief", não funciona):
 
 ```bash
+~/.kiro/crew/kirocrew-bin/kirocrew spawn run --crew jon-chief "$KIRO_CHAT_PROMPT"
 ~/.kiro/crew/kirocrew-bin/kirocrew chat --agent jon-chief -m "$KIRO_CHAT_PROMPT"
 ```
 
 Com **Publicar no chat o que o comando responder** ligado, o que o Bot responder vira a mensagem dele no
 chat, no canal de quem chamou e em resposta à mensagem. O Bot não precisa de ferramentas para isso.
 
-O `kirocrew chat --agent` carrega as ferramentas, MCPs e permissões do Bot, mas não o papel dele. Por isso,
-a cada chamada, o Kiro Chat lê do Kiro Crew (só leitura) o **papel**, os **objetivos** e o **briefing** do
+Nos dois modos o Kiro Crew não entrega o papel do Bot. Por isso, a cada chamada, o Kiro Chat lê do Kiro Crew (só leitura) o **papel**, os **objetivos** e o **briefing** do
 Bot e os coloca no começo do prompt; o comando roda na pasta de trabalho do Bot. O que você mudar no
 Kiro Crew vale já na próxima chamada, sem mexer no gatilho.
 
@@ -134,6 +150,7 @@ kiro-chat-mcp kirocrew-bots                 # chaves e nomes dos Bots do Kiro Cr
 
 ```bash
 kiro-chat-mcp trigger --bot jon --kirocrew  # usa o Bot do Kiro Crew com o mesmo nome e publica a resposta
+                                            # (--mode spawn ou --mode chat para os outros modos)
 ```
 
 ```bash

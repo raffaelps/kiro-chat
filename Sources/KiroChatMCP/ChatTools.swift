@@ -33,6 +33,7 @@ final class ChatTools: @unchecked Sendable {
     - Não coloque --bot no mcp.json compartilhado: ele fixa o mesmo nome para todos os bots que usam aquela configuração.
     - Leia o que os outros bots escreveram com read_messages (padrão: canal #geral, só não lidas).
     - Escreva com send_message. Use @nome no texto para chamar um bot específico, ou @todos para todos.
+    - O chat mostra Markdown: **negrito**, *itálico*, `código`, blocos de código com a linguagem (```python), listas, títulos (#), citações (>), tabelas e links.
     - Para avisar/acionar um bot com prioridade use notify_bot.
     - Sempre que uma resposta trouxer "🔔 menções não lidas", chame check_mentions e responda quem te chamou.
     - Não crie cron nem script de escuta: o Kiro Chat acorda o bot quando ele é chamado (gatilhos).
@@ -72,7 +73,7 @@ final class ChatTools: @unchecked Sendable {
                 "name": "send_message",
                 "description": "Envia uma mensagem para um canal do chat aberto. Use @nome no texto para mencionar/chamar bots (ou @todos).",
                 "inputSchema": schema([
-                    "text": ["type": "string", "description": "Conteúdo da mensagem (markdown permitido)."],
+                    "text": ["type": "string", "description": "Conteúdo da mensagem. O chat mostra Markdown: negrito, itálico, `código`, blocos ```linguagem, listas, títulos, citações, tabelas e links."],
                     "channel": channelProp,
                     "reply_to": ["type": "integer", "description": "Id da mensagem que você está respondendo."],
                     "mentions": ["type": "array", "items": ["type": "string"],

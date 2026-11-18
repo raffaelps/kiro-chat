@@ -154,6 +154,13 @@ final class ChatStoreTests: XCTestCase {
 
         XCTAssertEqual(KiroCrew.command(for: bots[0], binary: "/x/kirocrew"),
                        "/x/kirocrew chat --agent jon-chief -m \"$KIRO_CHAT_PROMPT\"")
+        let spawn = KiroCrew.command(for: bots[0], binary: "/x/kirocrew", mode: .spawn)
+        XCTAssertEqual(spawn, "/x/kirocrew spawn run --crew jon-chief \"$KIRO_CHAT_PROMPT\"")
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: spawn), "jon-chief")
+        XCTAssertEqual(KiroCrew.mode(ofCommand: spawn), .spawn)
+        XCTAssertEqual(KiroCrew.mode(ofCommand: KiroCrew.command(for: bots[0])), .chat)
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: "kirocrew spawn --port 5476 run --crew 'Jon - Chief' x"), "Jon - Chief")
+        XCTAssertNil(KiroCrew.mode(ofCommand: "echo oi"))
         XCTAssertEqual(KiroCrew.shellQuote("Jon - Chief"), "'Jon - Chief'")
         XCTAssertEqual(KiroCrew.shellQuote("it's"), "'it'\\''s'")
         XCTAssertEqual(KiroCrew.shellQuote("~/x"), "'~/x'")
@@ -177,6 +184,9 @@ final class ChatStoreTests: XCTestCase {
         try write("member-records/member-goals/catelyn.json", #"{"goals": [{"text": "Zerar crashes"}, {"text": " "}]}"#)
         try write("members/catelyn/briefing.md", "Prioridade: revisar o release.\n")
         try fm.createDirectory(at: home.appendingPathComponent("workspace-member-catelyn"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: home.appendingPathComponent("workspace-member-catelyn/src"), withIntermediateDirectories: true)
+        try write("workspace-member-catelyn/package.json", "{}")
+        try write("workspace-member-catelyn/.gitignore", "x")
 
         let p = try XCTUnwrap(KiroCrew.profile(forAgent: "catelyn", home: home))
         XCTAssertEqual(p.role, "Cuida da qualidade dos apps.")
@@ -194,6 +204,8 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertTrue(prompt.hasPrefix("Seu perfil no Kiro Crew"))
         XCTAssertTrue(prompt.contains("- Papel: Cuida da qualidade dos apps."))
         XCTAssertTrue(prompt.contains("  • Zerar crashes"))
+        XCTAssertTrue(prompt.contains("- Sua pasta de trabalho no Kiro Crew: \(p.workspace!.path)"))
+        XCTAssertTrue(prompt.contains("vale mais que o briefing): package.json, src/"))
         XCTAssertTrue(prompt.contains("Você (@Catelyn) foi chamado"))
         XCTAssertFalse(WakeContext.prompt(botName: "Catelyn", messages: [msg]).contains("Seu perfil"))
 
@@ -202,6 +214,51 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(KiroCrew.agentKey(inCommand: "kirocrew chat -q --agent=bran"), "bran")
         XCTAssertEqual(KiroCrew.agentKey(inCommand: "kirocrew chat --agent bran; echo fim"), "bran")
         XCTAssertNil(KiroCrew.agentKey(inCommand: "kiro-cli chat --agent jon"))
+    }
+
+    func testMarkdownBlocks() {
+        let text = """
+        Claro, @Fred! Veja:
+
+        ```python
+        def soma(a, b):
+            return a + b
+
+        assert soma(2, 3) == 5
+        ```
+
+        ## Próximos passos
+        - Ler o **Firebase**
+          - com `pytest`
+        2. Integrar
+        - [x] feito
+        > citação
+        > em duas linhas
+
+        | Nome | Papel |
+        |------|:-----:|
+        | Jon | Chefe |
+        | Bran |
+        ---
+        Fim
+        """
+        XCTAssertEqual(Markdown.parse(text), [
+            .paragraph("Claro, @Fred! Veja:"),
+            .code(language: "python", code: "def soma(a, b):\n    return a + b\n\nassert soma(2, 3) == 5"),
+            .heading(level: 2, text: "Próximos passos"),
+            .listItem(marker: "•", text: "Ler o **Firebase**", indent: 0),
+            .listItem(marker: "•", text: "com `pytest`", indent: 1),
+            .listItem(marker: "2.", text: "Integrar", indent: 0),
+            .listItem(marker: "☑", text: "feito", indent: 0),
+            .quote("citação\nem duas linhas"),
+            .table(header: ["Nome", "Papel"], rows: [["Jon", "Chefe"], ["Bran", ""]]),
+            .rule,
+            .paragraph("Fim"),
+        ])
+        XCTAssertTrue(Markdown.isSimple(Markdown.parse("oi **Jon**\nsegunda linha com `x`")))
+        XCTAssertEqual(Markdown.parse("```\nsem fim"), [.code(language: "", code: "sem fim")])
+        XCTAssertEqual(Markdown.parse("#hashtag e 3 - 2"), [.paragraph("#hashtag e 3 - 2")])
+        XCTAssertTrue(WakeContext.prompt(botName: "Jon", messages: []).contains("O chat mostra Markdown"))
     }
 
     func testCleanReplyAndPostReplyPrompt() throws {
@@ -245,6 +302,118 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(reply?.text, "Oi, Arya! Aqui é o Jon.")
         XCTAssertEqual(reply?.replyTo, ask.id)
         XCTAssertEqual(try store.unreadMentionCount(for: "jon"), 0, "menção respondida fica lida")
+    }
+
+    func testSpawnTriggerShowsApprovalWaitThenReply() throws {
+        try store.registerBot("jon")
+        // Comando falso: escreve o aviso de aprovação do `kirocrew spawn` e só responde depois.
+        let fake = ": kirocrew spawn run --crew jon; echo 'Waiting for spawn approval: approve it in the dashboard' >&2; sleep 1.5; echo 'Feito.'"
+        XCTAssertEqual(KiroCrew.mode(ofCommand: fake), .spawn)
+        try store.saveTrigger(WakeTrigger(bot: "jon", command: fake, delaySeconds: 0, postReply: true))
+        let ask = try store.post(sender: "arya", text: "@jon roda o build?")
+
+        let dispatcher = WakeDispatcher(store: store)
+        dispatcher.start(interval: 0.2)
+        defer { dispatcher.stop() }
+
+        var sawApproval = false
+        var reply: ChatMessage?
+        let deadline = Date().addingTimeInterval(15)
+        while reply == nil, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+            if try store.listeners(for: [ask.id])[ask.id]?.awaitingApproval == ["Jon"] { sawApproval = true }
+            reply = try store.messages().first { $0.sender == "jon" }
+        }
+        XCTAssertTrue(sawApproval, "menção direta mostra que o Bot espera aprovação no Kiro Crew")
+        XCTAssertEqual(reply?.text, "Feito.")
+        XCTAssertEqual(reply?.replyTo, ask.id)
+        XCTAssertNil(try store.listeners(for: [ask.id])[ask.id], "respondido: nada pendente")
+    }
+
+    func testHybridTriggerEscalatesToKiroCrewOnlyWhenAsked() throws {
+        try store.registerBot("jon")
+        // Modo rápido falso: conversa direto, mas pede [EXECUTAR] quando a mensagem fala em build.
+        let quick = """
+        : kirocrew chat --agent jon; case "$KIRO_CHAT_TEXT" in *build*) echo '[EXECUTAR] rodar o build';; *) echo 'Oi! Tudo certo.';; esac
+        """
+        var t = WakeTrigger(bot: "jon", command: quick, delaySeconds: 0, postReply: true, escalate: true)
+        XCTAssertEqual(KiroCrew.mode(of: t), .hybrid)
+        t.escalate = false
+        XCTAssertEqual(KiroCrew.mode(of: t), .chat)
+        t.escalate = true
+        try store.saveTrigger(t)
+        XCTAssertEqual(try store.trigger(for: "jon")?.escalate, true)
+
+        let dispatcher = WakeDispatcher(store: store)
+        // Execução falsa pelo Kiro Crew: confere que recebeu a ação no prompt e passa pela espera de aprovação.
+        dispatcher.spawnCommand = { key in
+            """
+            echo 'Waiting for spawn approval: approve it' >&2; sleep 1; \
+            case "$KIRO_CHAT_PROMPT" in *"precisa executar: rodar o build"*) echo "Build ok (\(key))";; *) echo 'sem ação';; esac
+            """
+        }
+        dispatcher.start(interval: 0.2)
+        defer { dispatcher.stop() }
+
+        func waitReply(to id: Int64) throws -> ChatMessage? {
+            let deadline = Date().addingTimeInterval(15)
+            while Date() < deadline {
+                if let r = try store.messages().first(where: { $0.sender == "jon" && $0.replyTo == id }) { return r }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            return nil
+        }
+
+        let hi = try store.post(sender: "arya", text: "@jon oi")
+        XCTAssertEqual(try waitReply(to: hi.id)?.text, "Oi! Tudo certo.", "conversa não passa pelo Kiro Crew")
+
+        let ask = try store.post(sender: "arya", text: "@jon roda o build?")
+        var sawExecuting = false
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            let l = try store.listeners(for: [ask.id])[ask.id]
+            if l?.executing == ["Jon"] || l?.awaitingApproval == ["Jon"] { sawExecuting = true }
+            if try store.messages().contains(where: { $0.sender == "jon" && $0.replyTo == ask.id }) { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertTrue(sawExecuting)
+        XCTAssertEqual(try waitReply(to: ask.id)?.text, "Build ok (jon)")
+        let log = try XCTUnwrap(try store.wakeLogs(bot: "jon", limit: 1).first)
+        XCTAssertTrue(log.output.contains("── execução pelo Kiro Crew ──"))
+        XCTAssertFalse(try store.messages().contains { $0.text.contains("[EXECUTAR]") }, "o pedido não vai para o chat")
+
+        // Execução recusada no Kiro Crew: o chat avisa o que o bot ia fazer.
+        dispatcher.spawnCommand = { _ in "echo 'Error: spawn rejected' >&2; exit 1" }
+        let again = try store.post(sender: "arya", text: "@jon roda o build de novo?")
+        var notice: ChatMessage?
+        let until = Date().addingTimeInterval(15)
+        while notice == nil, Date() < until {
+            Thread.sleep(forTimeInterval: 0.1)
+            notice = try store.messages().first { $0.kind == .system && $0.replyTo == again.id }
+        }
+        XCTAssertEqual(notice?.text.contains("ia executar pelo Kiro Crew: rodar o build"), true)
+        XCTAssertEqual(notice?.text.contains("recusada no Kiro Crew"), true)
+
+        XCTAssertEqual(FlowMarkers.actionRequest(in: "[executar] abrir a tarefa\nmais texto"), "abrir a tarefa")
+        XCTAssertEqual(FlowMarkers.actionRequest(in: "Vou olhar os logs [EXECUTAR]"), "Vou olhar os logs")
+        XCTAssertNil(FlowMarkers.actionRequest(in: "nada a executar aqui"))
+        XCTAssertEqual(FlowMarkers.stripNoReply("Regressão é X.\n\n[SEM RESPOSTA]"), "Regressão é X.")
+        XCTAssertEqual(FlowMarkers.stripNoReply("[SEM RESPOSTA]"), "[SEM RESPOSTA]")
+
+        // Prompt para o `kirocrew spawn`: cabe no limite, cortando a conversa antiga e mantendo a ação.
+        let long = (1...40).map { i in
+            ChatMessage(id: Int64(i), channel: "geral", sender: "arya", senderName: "Arya",
+                        text: String(repeating: "conversa antiga \(i) ", count: 20), kind: .message, replyTo: nil,
+                        createdAt: Date(), mentions: [])
+        }
+        let call = ChatMessage(id: 41, channel: "geral", sender: "arya", senderName: "Arya", text: "@jon roda o build",
+                               kind: .message, replyTo: nil, createdAt: Date(), mentions: ["jon"])
+        let fitted = WakeContext.fittedPrompt(botName: "Jon", messages: [call], postReply: true, context: long + [call],
+                                              stage: .execute("rodar o build"), maxLength: 4_800)
+        XCTAssertLessThanOrEqual(fitted.unicodeScalars.count, 4_800)
+        XCTAssertTrue(fitted.contains("precisa executar: rodar o build"))
+        XCTAssertTrue(fitted.contains("@jon roda o build"))
+        XCTAssertFalse(fitted.contains("conversa antiga 1 "), "a conversa mais antiga sai primeiro")
     }
 
     func testHopsCountBotExchangesAndHumanResets() throws {

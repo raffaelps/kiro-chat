@@ -28,9 +28,13 @@ public struct WakeTrigger: Codable, Hashable, Sendable {
     /// Publica o que o comando imprimir (stdout) no chat como resposta do bot.
     /// Assim o bot não precisa de ferramentas para responder (ex: `kirocrew chat -m`).
     public var postReply: Bool
+    /// Modo híbrido (Bots do Kiro Crew): responde pelo modo rápido e, se o bot pedir [EXECUTAR],
+    /// chama de novo pelo `kirocrew spawn` para ele executar com as ferramentas do Kiro Crew.
+    public var escalate: Bool
 
     public init(bot: String, kind: Kind = .command, command: String = "", url: String = "",
-                delaySeconds: Double = WakeTrigger.defaultDelay, maxPerHour: Int = 30, enabled: Bool = true, postReply: Bool = false) {
+                delaySeconds: Double = WakeTrigger.defaultDelay, maxPerHour: Int = 30, enabled: Bool = true,
+                postReply: Bool = false, escalate: Bool = false) {
         self.bot = ChatNames.normalize(bot)
         self.kind = kind
         self.command = command
@@ -39,6 +43,7 @@ public struct WakeTrigger: Codable, Hashable, Sendable {
         self.maxPerHour = maxPerHour
         self.enabled = enabled
         self.postReply = postReply
+        self.escalate = escalate
     }
 
     public var isConfigured: Bool {
@@ -61,6 +66,12 @@ public struct WakeLogEntry: Identifiable, Hashable, Sendable {
     public let isTest: Bool
 
     public var succeeded: Bool { status == "exit 0" || status.hasPrefix("HTTP 2") }
+
+    /// Status enquanto o `kirocrew spawn` espera aprovação no painel do Kiro Crew.
+    public static let awaitingApproval = "aguardando aprovação no Kiro Crew"
+    public var isAwaitingApproval: Bool { finishedAt == nil && status == Self.awaitingApproval }
+    /// Status enquanto o modo híbrido executa a ação pelo Kiro Crew.
+    public static let executing = "executando pelo Kiro Crew"
 }
 
 // MARK: - Armazenamento
@@ -98,15 +109,18 @@ extension ChatStore {
         if !tcols.contains("post_reply") {
             try exec("ALTER TABLE triggers ADD COLUMN post_reply INTEGER NOT NULL DEFAULT 0;")
         }
+        if !tcols.contains("escalate") {
+            try exec("ALTER TABLE triggers ADD COLUMN escalate INTEGER NOT NULL DEFAULT 0;")
+        }
     }
 
-    private static let triggerColumns = "bot, kind, command, url, delay_seconds, max_per_hour, enabled, post_reply"
+    private static let triggerColumns = "bot, kind, command, url, delay_seconds, max_per_hour, enabled, post_reply, escalate"
 
     private static func mapTrigger(_ s: OpaquePointer) -> WakeTrigger {
         WakeTrigger(bot: text(s, 0), kind: WakeTrigger.Kind(rawValue: text(s, 1)) ?? .command,
                     command: text(s, 2), url: text(s, 3), delaySeconds: sqlite3_column_double(s, 4),
                     maxPerHour: Int(sqlite3_column_int64(s, 5)), enabled: sqlite3_column_int(s, 6) != 0,
-                    postReply: sqlite3_column_int(s, 7) != 0)
+                    postReply: sqlite3_column_int(s, 7) != 0, escalate: sqlite3_column_int(s, 8) != 0)
     }
 
     public func trigger(for bot: String) throws -> WakeTrigger? {
@@ -121,14 +135,15 @@ extension ChatStore {
     public func saveTrigger(_ t: WakeTrigger) throws {
         guard !t.bot.isEmpty else { throw ChatStoreError.invalid("Gatilho sem bot.") }
         try run("""
-        INSERT INTO triggers(bot, kind, command, url, delay_seconds, max_per_hour, enabled, updated_at, post_reply)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO triggers(bot, kind, command, url, delay_seconds, max_per_hour, enabled, updated_at, post_reply, escalate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(bot) DO UPDATE SET kind = excluded.kind, command = excluded.command, url = excluded.url,
             delay_seconds = excluded.delay_seconds, max_per_hour = excluded.max_per_hour,
-            enabled = excluded.enabled, updated_at = excluded.updated_at, post_reply = excluded.post_reply
+            enabled = excluded.enabled, updated_at = excluded.updated_at, post_reply = excluded.post_reply,
+            escalate = excluded.escalate
         """, [.text(t.bot), .text(t.kind.rawValue), .text(t.command), .text(t.url),
               .double(max(0, t.delaySeconds)), .int(Int64(max(1, t.maxPerHour))), .int(t.enabled ? 1 : 0),
-              .double(Date().timeIntervalSince1970), .int(t.postReply ? 1 : 0)])
+              .double(Date().timeIntervalSince1970), .int(t.postReply ? 1 : 0), .int(t.escalate ? 1 : 0)])
         // Menções antigas não disparam um gatilho recém-criado.
         try run("UPDATE mentions SET dispatched_at = ? WHERE bot = ? AND dispatched_at IS NULL",
                 [.double(Date().timeIntervalSince1970), .text(t.bot)])
@@ -200,6 +215,11 @@ extension ChatStore {
         return try query("SELECT last_insert_rowid()", []) { sqlite3_column_int64($0, 0) }.first ?? 0
     }
 
+    /// Status de um disparo que ainda está rodando (ex: esperando aprovação).
+    public func setRunningWakeStatus(id: Int64, status: String) throws {
+        try run("UPDATE wake_log SET status = ? WHERE id = ? AND finished_at IS NULL", [.text(status), .int(id)])
+    }
+
     public func finishWakeLog(id: Int64, status: String, output: String) throws {
         try run("UPDATE wake_log SET finished_at = ?, status = ?, output = ? WHERE id = ?",
                 [.double(Date().timeIntervalSince1970), .text(status), .text(output), .int(id)])
@@ -226,11 +246,47 @@ extension ChatStore {
 // MARK: - Prompt / variáveis
 
 public enum WakeContext {
+    /// Etapa do modo híbrido em que o bot está.
+    public enum Stage: Equatable, Sendable {
+        /// Resposta normal.
+        case reply
+        /// Modo rápido do híbrido: responde conversando, ou pede [EXECUTAR] se precisar agir.
+        case triage
+        /// Rodando pelo Kiro Crew para executar a ação que o bot pediu.
+        case execute(String)
+
+        var instructions: String {
+            switch self {
+            case .reply:
+                return ""
+            case .triage:
+                return """
+
+
+                Você está no modo rápido: aqui dá para conversar, explicar e responder com o que você já sabe, mas não \
+                para executar nada. Se, para atender, você precisar EXECUTAR algo (rodar comandos, build ou testes, criar \
+                ou alterar arquivos, abrir tarefas, consultar sistemas com suas ferramentas), não tente agora: responda só com uma linha
+                \(FlowMarkers.execute) <o que você vai fazer, em poucas palavras>
+                e o Kiro Chat vai te chamar de novo pelo Kiro Crew, com suas ferramentas, para executar (pode precisar da \
+                aprovação de um humano). Se dá para responder sem executar nada, responda direto.
+                """
+            case .execute(let action):
+                return """
+
+
+                Você está rodando pelo Kiro Crew, com suas ferramentas, porque decidiu que precisa executar: \(action)
+                Execute agora de fato e responda com o resultado: o que fez, o que mudou e o que ficou pendente. \
+                Não responda \(FlowMarkers.execute) de novo.
+                """
+            }
+        }
+    }
+
     /// Texto pronto para entregar ao bot acordado.
     /// `profile`: perfil do Bot no Kiro Crew (papel, objetivos...), que vai no começo do prompt.
     public static func prompt(botName: String, messages: [ChatMessage], postReply: Bool = false,
                               maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = [],
-                              profile: KiroCrew.Profile? = nil) -> String {
+                              profile: KiroCrew.Profile? = nil, stage: Stage = .reply) -> String {
         let intro = profile.flatMap { $0.isEmpty ? nil : $0.promptSection + "\n\n" } ?? ""
         var header: String
         if context.isEmpty {
@@ -296,7 +352,7 @@ public enum WakeContext {
 
             Sua resposta final será publicada automaticamente em #\(channel) como mensagem sua, em resposta a quem te chamou. \
             Escreva só o texto dessa mensagem, direto ao ponto. Não use ferramentas para enviar a resposta.
-            """ + rules
+            """ + stage.instructions + "\n\n" + Markdown.botHint + rules
         }
         return header + """
 
@@ -304,7 +360,38 @@ public enum WakeContext {
         Use as ferramentas do MCP kiro-chat: se ainda não tiver identidade, chame join_chat com o nome "\(botName)". \
         Leia o contexto com read_messages no canal da mensagem e responda com send_message no mesmo canal, \
         usando reply_to com o id da mensagem.
-        """ + rules
+        """ + "\n\n" + Markdown.botHint + rules
+    }
+
+    /// O prompt, encurtado até caber em `maxLength` caracteres: corta primeiro a conversa mais antiga,
+    /// depois o briefing e, em último caso, o meio do texto (mantendo o começo e as instruções do fim).
+    public static func fittedPrompt(botName: String, messages: [ChatMessage], postReply: Bool = false,
+                                    maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = [],
+                                    profile: KiroCrew.Profile? = nil, stage: Stage = .reply, maxLength: Int) -> String {
+        var ctx = context
+        var prof = profile
+        func build() -> String {
+            prompt(botName: botName, messages: messages, postReply: postReply, maxHops: maxHops,
+                   context: ctx, profile: prof, stage: stage)
+        }
+        var p = build()
+        while p.unicodeScalars.count > maxLength {
+            if ctx.count > 2 { ctx = Array(ctx.suffix(ctx.count / 2)) }
+            else if !ctx.isEmpty { ctx = [] }
+            else if let pr = prof, pr.briefing.count > 300 { prof = pr.shorteningBriefing(to: 300) }
+            else { break }
+            p = build()
+        }
+        let scalars = Array(p.unicodeScalars)
+        guard scalars.count > maxLength else { return p }
+        let marker = "\n…(cortado)…\n"
+        let room = maxLength - marker.unicodeScalars.count
+        let head = room * 2 / 5, tail = room - head
+        var out = String.UnicodeScalarView()
+        out.append(contentsOf: scalars.prefix(head))
+        out.append(contentsOf: marker.unicodeScalars)
+        out.append(contentsOf: scalars.suffix(tail))
+        return String(out)
     }
 
     /// Variáveis de ambiente passadas ao comando. O texto das mensagens só chega por aqui,
@@ -312,13 +399,17 @@ public enum WakeContext {
     public static func environment(botKey: String, botName: String, messages: [ChatMessage],
                                    databasePath: String, postReply: Bool = false,
                                    maxHops: Int = ChatStore.defaultMaxBotHops,
-                                   context: [ChatMessage] = [], profile: KiroCrew.Profile? = nil) -> [String: String] {
+                                   context: [ChatMessage] = [], profile: KiroCrew.Profile? = nil,
+                                   stage: Stage = .reply, maxLength: Int? = nil) -> [String: String] {
         let last = messages.last
         return [
             "KIRO_CHAT_BOT": botName,
             "KIRO_CHAT_BOT_KEY": botKey,
-            "KIRO_CHAT_PROMPT": prompt(botName: botName, messages: messages, postReply: postReply,
-                                       maxHops: maxHops, context: context, profile: profile),
+            "KIRO_CHAT_PROMPT": maxLength.map {
+                fittedPrompt(botName: botName, messages: messages, postReply: postReply, maxHops: maxHops,
+                             context: context, profile: profile, stage: stage, maxLength: $0)
+            } ?? prompt(botName: botName, messages: messages, postReply: postReply,
+                        maxHops: maxHops, context: context, profile: profile, stage: stage),
             "KIRO_CHAT_HOP": String((messages.map(\.hop).max() ?? 0) + 1),
             "KIRO_CHAT_FROM": last?.senderName ?? "",
             "KIRO_CHAT_CHANNEL": last?.channel ?? ChatNames.defaultChannel,
@@ -363,6 +454,10 @@ public final class WakeDispatcher: @unchecked Sendable {
     private var processes: [String: Process] = [:]
     private let log: @Sendable (String) -> Void
     private static let maxOutput = 8_000
+    /// Comando que executa a ação de um Bot do Kiro Crew no modo híbrido (trocado nos testes).
+    var spawnCommand: @Sendable (String) -> String = { key in
+        KiroCrew.command(for: KiroCrew.Bot(key: key, displayName: "", description: ""), mode: .spawn)
+    }
 
     public init(store: ChatStore, log: @escaping @Sendable (String) -> Void = { _ in }) {
         self.store = store
@@ -437,11 +532,28 @@ public final class WakeDispatcher: @unchecked Sendable {
         switch t.kind {
         case .command:
             // Bot do Kiro Crew: lê o perfil dele agora (pega o que mudou no Kiro Crew) e roda na pasta dele.
-            let profile = KiroCrew.agentKey(inCommand: t.command).flatMap { KiroCrew.profile(forAgent: $0) }
-            let env = WakeContext.environment(botKey: t.bot, botName: name, messages: messages,
-                                              databasePath: store.url.path, postReply: t.postReply,
-                                              maxHops: store.maxBotHops, context: context, profile: profile)
-            let process = runCommand(t.command, env: env, directory: profile?.workspace) { status, output, reply in
+            let crewKey = KiroCrew.agentKey(inCommand: t.command)
+            let profile = crewKey.flatMap { KiroCrew.profile(forAgent: $0) }
+            // Híbrido: primeiro a resposta rápida; se o bot pedir [EXECUTAR], roda de novo pelo Kiro Crew.
+            let hybrid = t.escalate && t.postReply && crewKey != nil && KiroCrew.mode(ofCommand: t.command) == .chat
+            // O `kirocrew spawn` recusa tarefas longas: nele o prompt é encurtado até caber (com folga).
+            let spawnLimit = KiroCrew.spawnTaskLimit - 200
+            let environment: @Sendable (WakeContext.Stage, Bool) -> [String: String] = { stage, viaSpawn in
+                WakeContext.environment(botKey: t.bot, botName: name, messages: messages,
+                                        databasePath: self.store.url.path, postReply: t.postReply,
+                                        maxHops: self.store.maxBotHops, context: context, profile: profile,
+                                        stage: stage, maxLength: viaSpawn ? spawnLimit : nil)
+            }
+            let env = environment(hybrid ? .triage : .reply, KiroCrew.mode(ofCommand: t.command) == .spawn)
+            let waiting = Flag()
+            let onStderr: @Sendable (String) -> Void = { chunk in
+                guard chunk.contains(KiroCrew.approvalWaitMarker), waiting.setOnce() else { return }
+                self.queue.async {
+                    try? self.store.setRunningWakeStatus(id: logId, status: WakeLogEntry.awaitingApproval)
+                    self.log("@\(name): aguardando aprovação no painel do Kiro Crew (Approvals)")
+                }
+            }
+            let complete: @Sendable (String, String, String) -> Void = { status, output, reply in
                 self.queue.async { self.processes[t.bot] = nil }
                 var note = ""
                 if self.store.wakePaused, !isTest {
@@ -451,6 +563,26 @@ public final class WakeDispatcher: @unchecked Sendable {
                 }
                 finish(status, note.isEmpty ? output : note + "\n" + output)
             }
+            let process = runCommand(t.command, env: env, directory: profile?.workspace, onStderr: onStderr) { status, output, reply in
+                guard hybrid, let key = crewKey, status == "exit 0", isTest || !self.store.wakePaused,
+                      let action = FlowMarkers.actionRequest(in: Self.cleanReply(reply)) else {
+                    complete(status, output, reply)
+                    return
+                }
+                // O bot pediu para executar: chama de novo pelo Kiro Crew, com as ferramentas dele.
+                self.queue.async {
+                    try? self.store.setRunningWakeStatus(id: logId, status: WakeLogEntry.executing)
+                    self.log("@\(name): executando pelo Kiro Crew — \(action)")
+                    let first = "── resposta rápida ──\n" + output + "\n── execução pelo Kiro Crew ──\n"
+                    let second = self.runCommand(self.spawnCommand(key), env: environment(.execute(action), true),
+                                                 directory: profile?.workspace, onStderr: onStderr) { status2, output2, reply2 in
+                        if status2 != "exit 0", !isTest { self.reportFailedAction(bot: t.bot, action: action, status: status2,
+                                                                               output: output2, to: messages) }
+                        complete(status2, first + output2, reply2)
+                    }
+                    if let second { self.processes[t.bot] = second }
+                }
+            }
             if let process { processes[t.bot] = process }
         case .webhook:
             post(t.url, body: WakeContext.webhookBody(botKey: t.bot, botName: name, messages: messages,
@@ -459,9 +591,26 @@ public final class WakeDispatcher: @unchecked Sendable {
         }
     }
 
+    /// Avisa no chat que a ação pedida no modo híbrido não rodou (recusada no Kiro Crew, erro...).
+    private func reportFailedAction(bot: String, action: String, status: String, output: String, to messages: [ChatMessage]) {
+        guard let last = messages.last else { return }
+        let lines = output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let error = lines.last { $0.hasPrefix("Error:") }.map { String($0.dropFirst(6)).trimmingCharacters(in: .whitespaces) }
+        let why: String
+        switch error {
+        case let e? where e.lowercased().contains("rejected"): why = "a execução foi recusada no Kiro Crew"
+        case let e?: why = "erro do Kiro Crew: \(e)"
+        case nil: why = "o comando terminou com \(status)"
+        }
+        _ = try? store.post(channel: last.channel, sender: "sistema", text: """
+        ⚠️ \(store.handle(for: bot)) ia executar pelo Kiro Crew: \(action)
+        Não rodou: \(why). Detalhes em Gatilho de chamada → Últimos disparos.
+        """, kind: .system, replyTo: last.id)
+    }
+
     /// Publica a resposta do bot no canal da última menção, em resposta a ela, e dá as menções como lidas.
     private func publishReply(_ raw: String, from bot: String, to messages: [ChatMessage], isTest: Bool) -> String {
-        let reply = Self.cleanReply(raw)
+        let reply = FlowMarkers.stripNoReply(Self.cleanReply(raw))
         guard !reply.isEmpty else { return "(o comando não imprimiu resposta; nada publicado)" }
         let footer = "\n\n── saída completa do comando ──"
         if FlowMarkers.isNoReply(reply) {
@@ -512,6 +661,7 @@ public final class WakeDispatcher: @unchecked Sendable {
 
     @discardableResult
     private func runCommand(_ command: String, env: [String: String], directory: URL? = nil,
+                            onStderr: (@Sendable (String) -> Void)? = nil,
                             completion: @escaping @Sendable (String, String, String) -> Void) -> Process? {
         let process = Process()
         // Shell de login: carrega o PATH do usuário (Homebrew, kiro-cli...) mesmo rodando pelo launchd.
@@ -530,7 +680,11 @@ public final class WakeDispatcher: @unchecked Sendable {
             let d = h.availableData
             combined.append(d); stdout.append(d)
         }
-        errPipe.fileHandleForReading.readabilityHandler = { h in combined.append(h.availableData) }
+        errPipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            combined.append(d)
+            if let onStderr, !d.isEmpty { onStderr(String(decoding: d, as: UTF8.self)) }
+        }
         process.terminationHandler = { p in
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
@@ -584,5 +738,18 @@ private final class OutputBuffer: @unchecked Sendable {
     var string: String {
         lock.lock(); defer { lock.unlock() }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// Marca que só vira verdadeira uma vez (seguro entre threads).
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    /// true só na primeira chamada.
+    func setOnce() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
     }
 }

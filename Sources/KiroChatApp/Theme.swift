@@ -18,6 +18,8 @@ enum Theme {
     static let warning = Color(red: 0.98, green: 0.72, blue: 0.24)
 
     static let radius: CGFloat = 14
+    /// Datas relativas ("há 5 minutos") em português, mesmo com o macOS em outro idioma.
+    static let locale = Locale(identifier: "pt_BR")
 }
 
 extension View {

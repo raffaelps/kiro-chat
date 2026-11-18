@@ -11,6 +11,18 @@ import SQLite3
 public enum FlowMarkers {
     public static let end = "[FIM]"
     public static let noReply = "[SEM RESPOSTA]"
+    /// Modo híbrido: o bot precisa executar algo pelo Kiro Crew.
+    public static let execute = "[EXECUTAR]"
+
+    /// Se a resposta pede para executar ("[EXECUTAR] rodar o build"), o que o bot vai fazer.
+    public static func actionRequest(in text: String) -> String? {
+        guard let r = text.range(of: execute, options: .caseInsensitive) else { return nil }
+        let after = text[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let before = text[..<r.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        let action = after.isEmpty ? before : after
+        let line = action.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
+        return String((line.isEmpty ? "o que foi pedido" : line).prefix(300))
+    }
 
     /// Tira o marcador [FIM] do texto. Retorna o texto (com "✅" no lugar) e se o marcador estava lá.
     public static func extractEnd(_ text: String) -> (String, Bool) {
@@ -18,6 +30,13 @@ public enum FlowMarkers {
         let stripped = text.replacingOccurrences(of: end, with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (stripped.isEmpty ? "✅ Concluído." : "✅ " + stripped, true)
+    }
+
+    /// Tira um "[SEM RESPOSTA]" que veio junto de uma resposta de verdade (o bot respondeu e marcou mesmo assim).
+    public static func stripNoReply(_ text: String) -> String {
+        guard !isNoReply(text), text.range(of: noReply, options: .caseInsensitive) != nil else { return text }
+        return text.replacingOccurrences(of: noReply, with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// A resposta inteira é "[SEM RESPOSTA]" (aceita variações de caixa e pontuação ao redor).
@@ -198,7 +217,14 @@ extension ChatStore {
         public var queued: [String] = []
         /// O gatilho falhou.
         public var failed: [String] = []
-        public var isEmpty: Bool { heard.isEmpty && answering.isEmpty && queued.isEmpty && failed.isEmpty }
+        /// Esperando alguém aprovar a execução no painel do Kiro Crew.
+        public var awaitingApproval: [String] = []
+        /// Executando uma ação pelo Kiro Crew (modo híbrido).
+        public var executing: [String] = []
+        public var isEmpty: Bool {
+            heard.isEmpty && answering.isEmpty && queued.isEmpty && failed.isEmpty
+                && awaitingApproval.isEmpty && executing.isEmpty
+        }
     }
 
     public func listeners(for messageIds: [Int64]) throws -> [Int64: Listeners] {
@@ -207,16 +233,17 @@ extension ChatStore {
         // Para cada bot que escutou: respondeu? qual foi o disparo dele para esta mensagem? ainda esperando?
         let rows = try query("""
         SELECT n.message_id, COALESCE(NULLIF(b.display_name, ''), n.bot),
-               EXISTS(SELECT 1 FROM messages r WHERE r.reply_to = n.message_id AND r.sender = n.bot),
+               EXISTS(SELECT 1 FROM messages r WHERE r.sender = n.bot AND (r.reply_to = n.message_id
+                      OR (w.id IS NOT NULL AND (',' || w.message_ids || ',') LIKE '%,' || r.reply_to || ',%'))),
                w.id IS NOT NULL, w.finished_at IS NOT NULL, COALESCE(w.status, ''),
-               n.dispatched_at IS NULL AND COALESCE(t.enabled, 0) = 1
+               n.dispatched_at IS NULL AND n.read_at IS NULL AND COALESCE(t.enabled, 0) = 1
         FROM mentions n
         LEFT JOIN bots b ON b.name = n.bot
         LEFT JOIN triggers t ON t.bot = n.bot
         LEFT JOIN wake_log w ON w.id = (
             SELECT MAX(id) FROM wake_log x WHERE x.bot = n.bot AND x.is_test = 0
               AND (',' || x.message_ids || ',') LIKE '%,' || n.message_id || ',%')
-        WHERE n.implicit = 1 AND n.message_id IN (\(placeholders))
+        WHERE n.message_id IN (\(placeholders))
         ORDER BY n.bot
         """, messageIds.map { .int($0) }) { s in
             (id: sqlite3_column_int64(s, 0), name: Self.text(s, 1), replied: sqlite3_column_int(s, 2) != 0,
@@ -225,7 +252,11 @@ extension ChatStore {
         }
         var result: [Int64: Listeners] = [:]
         for r in rows where !r.replied {
-            if r.woke && !r.finished { result[r.id, default: Listeners()].answering.append(r.name) }
+            if r.woke && !r.finished && r.status == WakeLogEntry.awaitingApproval {
+                result[r.id, default: Listeners()].awaitingApproval.append(r.name)
+            } else if r.woke && !r.finished && r.status == WakeLogEntry.executing {
+                result[r.id, default: Listeners()].executing.append(r.name)
+            } else if r.woke && !r.finished { result[r.id, default: Listeners()].answering.append(r.name) }
             else if r.woke && (r.status == "exit 0" || r.status.hasPrefix("HTTP 2")) { result[r.id, default: Listeners()].heard.append(r.name) }
             else if r.woke { result[r.id, default: Listeners()].failed.append(r.name) }
             else if r.queued { result[r.id, default: Listeners()].queued.append(r.name) }
