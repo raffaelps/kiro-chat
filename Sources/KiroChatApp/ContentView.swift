@@ -469,7 +469,7 @@ struct MessageList: View {
                     }
                     ForEach(Array(model.messages.enumerated()), id: \.element.id) { idx, m in
                         let prev = idx > 0 ? model.messages[idx - 1] : nil
-                        MessageRow(message: m, grouped: isGrouped(m, after: prev))
+                        MessageRow(message: m, grouped: isGrouped(m, after: prev), showQuote: showQuote(m, at: idx))
                             .id(m.id)
                     }
                     // Fim da conversa, já com o respiro abaixo da última mensagem. Rolar até aqui
@@ -488,7 +488,20 @@ struct MessageList: View {
             .onAppear { scrollToBottom(proxy, animated: false) }
             .onChange(of: model.messages.last?.id) { scrollToBottom(proxy, animated: true) }
             .onChange(of: model.messages.last.flatMap { model.listeners[$0.id] }) { scrollToBottom(proxy, animated: true) }
+            // A citação acima da caixa de texto a deixa mais alta: mantém o fim da conversa visível.
+            .onChange(of: model.replyingTo?.message.id) { if model.replyingTo != nil { scrollToBottom(proxy, animated: true) } }
+            .onChange(of: model.scrollTarget) {
+                guard let id = model.scrollTarget else { return }
+                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
+                model.scrollTarget = nil
+            }
         }
+    }
+
+    /// Cita a mensagem respondida só se ela não estiver entre as três logo acima (aí a resposta já se explica).
+    private func showQuote(_ m: ChatMessage, at idx: Int) -> Bool {
+        guard let r = m.replyTo, m.kind != .system else { return false }
+        return !model.messages[max(0, idx - 3)..<idx].contains { $0.id == r }
     }
 
     private static let bottomID = "fim-da-conversa"
@@ -509,6 +522,7 @@ struct MessageRow: View {
     @EnvironmentObject var model: ChatViewModel
     let message: ChatMessage
     let grouped: Bool
+    var showQuote = false
 
     private static let timeFormat: DateFormatter = {
         let f = DateFormatter()
@@ -521,13 +535,31 @@ struct MessageRow: View {
     private var isHuman: Bool { model.bots.first { $0.name == message.sender }?.isHuman ?? false }
     private var isAlert: Bool { message.kind == .alert }
 
-    /// "18:02 · #12 · ↩ #11", em fonte monoespaçada e discreta, abaixo da mensagem.
+    /// "18:02 · #12 · ↩ #11", em fonte monoespaçada e discreta, abaixo da mensagem,
+    /// seguido dos botões de responder (aqui e no privado com o bot).
     private var meta: some View {
         var parts = [Self.timeFormat.string(from: message.createdAt), "#\(message.id)"]
         if let r = message.replyTo { parts.append("↩ #\(r)") }
-        return Text(parts.joined(separator: " · "))
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(Theme.tertiaryText)
+        return HStack(spacing: 10) {
+            Text(parts.joined(separator: " · "))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.tertiaryText)
+            MessageAction(systemName: "arrowshape.turn.up.left", label: "Responder",
+                          help: "Responder a esta mensagem aqui na conversa") { model.reply(to: message) }
+            if model.canReplyInDirect(message) {
+                MessageAction(systemName: "bubble.left.and.bubble.right", label: "No privado",
+                              help: "Responder no privado com \(message.senderName), citando esta mensagem") {
+                    model.replyInDirect(to: message)
+                }
+            }
+        }
+    }
+
+    /// Mensagem respondida, citada acima do balão.
+    @ViewBuilder private var quote: some View {
+        if showQuote, let id = message.replyTo {
+            QuoteStrip(message: model.quoted(id), id: id, inChannel: model.messages.contains { $0.id == id })
+        }
     }
 
     var body: some View {
@@ -542,7 +574,10 @@ struct MessageRow: View {
         }
         .contextMenu {
             if message.kind != .system {
-                Button("Responder") { model.draft = "\(model.handle(for: message.sender)) " }
+                Button("Responder") { model.reply(to: message) }
+                if model.canReplyInDirect(message) {
+                    Button("Responder no privado com \(message.senderName)") { model.replyInDirect(to: message) }
+                }
             }
             Button("Copiar texto") {
                 NSPasteboard.general.clearContents()
@@ -572,6 +607,7 @@ struct MessageRow: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Theme.warning)
             }
+            quote
             MessageBody(text: message.text, me: model.me, handles: model.handles, onAccent: true)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 16)
@@ -605,6 +641,7 @@ struct MessageRow: View {
                         }
                     }
                 }
+                quote
                 MessageBody(text: message.text, me: model.me, handles: model.handles)
                     .lineSpacing(2)
                     .padding(.horizontal, 14)
@@ -618,6 +655,70 @@ struct MessageRow: View {
             Spacer(minLength: 60)
         }
         .padding(.top, grouped ? 4 : 12)
+    }
+}
+
+/// Botão pequeno no rodapé da mensagem: discreto, acende ao passar o mouse.
+struct MessageAction: View {
+    let systemName: String
+    let label: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(label, systemImage: systemName)
+                .font(.system(size: 11, weight: .medium))
+                .labelStyle(.titleAndIcon)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(hovering ? Theme.cardHover : .clear))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(hovering ? Theme.accent : Theme.tertiaryText)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
+/// Citação da mensagem respondida: "↩ Jon em #geral: começo do texto…". Clicar rola até ela.
+struct QuoteStrip: View {
+    @EnvironmentObject var model: ChatViewModel
+    let message: ChatMessage?
+    let id: Int64
+    /// A mensagem está na conversa aberta (dá para rolar até ela).
+    let inChannel: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrowshape.turn.up.left.fill").font(.system(size: 9))
+            if let m = message {
+                Text(m.senderName).fontWeight(.semibold)
+                if !inChannel { Text("em #\(m.channel)").foregroundStyle(Theme.tertiaryText) }
+                Text(QuoteStrip.snippet(m.text)).lineLimit(1).truncationMode(.tail)
+            } else {
+                Text("mensagem #\(id) (apagada)").italic()
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Theme.secondaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .overlay(alignment: .leading) { Capsule().fill(Theme.accent.opacity(0.6)).frame(width: 2) }
+        .frame(maxWidth: 520, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { if inChannel { model.scrollTarget = id } }
+        .help(inChannel ? "Ir até a mensagem respondida" : "Mensagem respondida, de outro canal")
+    }
+
+    /// Uma linha só, sem Markdown pesado: para citar o começo da mensagem.
+    static func snippet(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("```") }.joined(separator: " ")
+        let clean = flat.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        return clean.count > 160 ? String(clean.prefix(160)) + "…" : clean
     }
 }
 
@@ -734,6 +835,24 @@ struct Composer: View {
 
     var body: some View {
         let empty = model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        VStack(alignment: .leading, spacing: 6) {
+        if let r = model.replyingTo, r.channel == channel {
+            HStack(spacing: 6) {
+                Text("Respondendo a").foregroundStyle(Theme.tertiaryText)
+                QuoteStrip(message: r.message, id: r.message.id,
+                           inChannel: r.message.channel == channel && model.messages.contains { $0.id == r.message.id })
+                Spacer(minLength: 4)
+                Button { model.replyingTo = nil } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.tertiaryText)
+                .help("Cancelar a resposta (esc)")
+            }
+            .font(.system(size: 11))
+            .padding(.leading, 6)
+            .padding(.top, 2)
+        }
         HStack(alignment: .bottom, spacing: 4) {
             Menu {
                 ForEach(model.bots.filter { $0.name != model.me }) { bot in
@@ -781,8 +900,12 @@ struct Composer: View {
                     return .handled
                 }
                 .onKeyPress(.escape) {
-                    guard !model.mentionSuggestions.isEmpty else { return .ignored }
-                    model.dismissSuggestions()
+                    if !model.mentionSuggestions.isEmpty {
+                        model.dismissSuggestions()
+                        return .handled
+                    }
+                    guard model.replyingTo != nil else { return .ignored }
+                    model.replyingTo = nil
                     return .handled
                 }
                 .padding(.horizontal, 6)
@@ -800,6 +923,7 @@ struct Composer: View {
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(empty)
             .help("Enviar (↩ ou ⌘↩)")
+        }
         }
         .padding(.leading, 10)
         .padding(.trailing, 8)

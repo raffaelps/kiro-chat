@@ -480,6 +480,22 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertTrue(p.contains("troca 1 de no máximo 6"))
     }
 
+    func testReplyInDirectBringsOriginalToContext() throws {
+        try store.registerBot("raffael", isHuman: true)
+        try store.registerBot("jon")
+        let original = try store.post(sender: "jon", text: "O deploy da API de exemplo falhou no passo de migração")
+        let dm = try store.openDirectChannel(with: "jon", by: "raffael")
+        let reply = try store.post(channel: dm, sender: "raffael", text: "Pode me explicar melhor?", replyTo: original.id)
+        XCTAssertEqual(reply.mentions, ["jon"], "na conversa direta o bot é acordado sem @")
+        XCTAssertEqual(reply.hop, 0)
+        let ctx = try store.conversationContext(for: [reply])
+        XCTAssertTrue(ctx.contains { $0.id == original.id }, "a mensagem respondida (de outro canal) entra no contexto")
+        XCTAssertEqual(ctx.map(\.id), ctx.map(\.id).sorted())
+        let p = WakeContext.prompt(botName: "Jon", messages: [reply], postReply: true, maxHops: 6, context: ctx)
+        XCTAssertTrue(p.contains("falhou no passo de migração"))
+        XCTAssertTrue(p.contains("(resposta a #\(original.id))"))
+    }
+
     func testTwoBotsPingPongStopsAtLimit() throws {
         try store.registerBot("raffael", isHuman: true)
         try store.registerBot("jon"); try store.registerBot("catelyn")

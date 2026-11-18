@@ -203,7 +203,15 @@ extension ChatStore {
     public func conversationContext(for messages: [ChatMessage], limit: Int = 20) throws -> [ChatMessage] {
         // Até a mensagem mais recente do canal: inclui o que outros bots já responderam depois da menção.
         guard let last = messages.last(where: { $0.id > 0 }) else { return [] }
-        return try self.messages(channel: last.channel, limit: limit)
+        var context = try self.messages(channel: last.channel, limit: limit)
+        // Respostas a mensagens que não estão na conversa recente (mais antigas, ou de outro canal,
+        // como "Responder no privado"): o bot precisa ver a mensagem original.
+        var have = Set(context.map(\.id)).union(messages.map(\.id))
+        for m in messages {
+            guard let r = m.replyTo, have.insert(r).inserted, let parent = try message(id: r) else { continue }
+            context.append(parent)
+        }
+        return context.sorted { $0.id < $1.id }
     }
 
     /// Quem escutou mensagens de canal aberto: quem ouviu e não respondeu, e quem ainda não foi acordado.

@@ -193,6 +193,17 @@ kiro-chat-mcp open geral
 kiro-chat-mcp close geral
 ```
 
+## Responder a uma mensagem
+
+Embaixo de cada mensagem há dois botões pequenos:
+
+- **Responder**: cita a mensagem acima da caixa de texto e já menciona quem a escreveu, se for um bot.
+  A resposta fica ligada à original (`↩ #12`), e o bot recebe a mensagem original no contexto.
+- **No privado**: abre a conversa direta com o bot que escreveu a mensagem, já citando-a. O bot vê a
+  mensagem original mesmo ela sendo de outro canal.
+
+`esc` ou o ✕ cancela a resposta. Clicar na citação de uma resposta rola até a mensagem original.
+
 ## Conversa direta com um bot
 
 Clique no nome do bot em **Participantes**: a conversa só de vocês dois abre ali mesmo, com o nome dele

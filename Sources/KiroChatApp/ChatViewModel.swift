@@ -12,6 +12,8 @@ final class ChatViewModel: ObservableObject {
     @Published var selectedChannel: String? = ChatNames.defaultChannel {
         didSet {
             guard oldValue != selectedChannel else { return }
+            // A resposta em andamento vale só para o canal onde ela vai ser enviada.
+            if replyingTo?.channel != selectedChannel { replyingTo = nil }
             createDirectChannelIfNeeded()
             loadSelectedChannel()
         }
@@ -26,6 +28,12 @@ final class ChatViewModel: ObservableObject {
         didSet { if draft != oldValue { suggestionIndex = 0 } }
     }
     @Published var sendAsAlert = false
+    /// Mensagem sendo respondida pela caixa de texto (aparece citada acima dela).
+    @Published var replyingTo: ReplyDraft?
+    /// Pede à lista de mensagens que role até esta mensagem (ao clicar numa citação).
+    @Published var scrollTarget: Int64?
+    /// Mensagens citadas que não estão no canal aberto (ex: respondidas no privado), por id.
+    private var quotedCache: [Int64: ChatMessage] = [:]
     @Published var errorMessage: String?
     @Published var showSetup = false
     @Published var showNewChannel = false
@@ -225,9 +233,11 @@ final class ChatViewModel: ObservableObject {
         default: break
         }
         do {
-            try store.post(channel: channel, sender: me, text: text, kind: sendAsAlert ? .alert : .message)
+            let replyTo = replyingTo?.channel == channel ? replyingTo?.message.id : nil
+            try store.post(channel: channel, sender: me, text: text, kind: sendAsAlert ? .alert : .message, replyTo: replyTo)
             draft = ""
             sendAsAlert = false
+            replyingTo = nil
             refresh()
         } catch {
             errorMessage = "\(error)"
@@ -363,6 +373,45 @@ final class ChatViewModel: ObservableObject {
         } catch {
             errorMessage = "\(error)"
         }
+    }
+
+    // MARK: - Respostas
+
+    /// Responde a uma mensagem no canal em que ela está: cita a mensagem e menciona quem a escreveu, se for um bot.
+    func reply(to message: ChatMessage) {
+        guard let channel = selectedChannel else { return }
+        replyingTo = ReplyDraft(message: message, channel: channel)
+        let isBot = bots.first { $0.name == message.sender }.map { !$0.isHuman } ?? true
+        let inItsDirect = channels.first { $0.name == channel }?.dmWith == message.sender
+        if message.sender != me, isBot, !inItsDirect { insertMention(handle(for: message.sender)) }
+        focusComposer &+= 1
+    }
+
+    /// Responde no privado com o bot que escreveu a mensagem: abre a conversa direta já citando a mensagem.
+    func replyInDirect(to message: ChatMessage) {
+        openDirect(with: message.sender)
+        guard let channel = selectedChannel, channel != message.channel else { return }
+        replyingTo = ReplyDraft(message: message, channel: channel)
+        // A conversa direta já acorda o bot; a menção que estava no rascunho para ele sobra.
+        let mention = handle(for: message.sender) + " "
+        if draft.hasPrefix(mention) { draft.removeFirst(mention.count) }
+        focusComposer &+= 1
+    }
+
+    /// Dá para responder no privado: mensagens de bots, fora da conversa direta com ele.
+    func canReplyInDirect(_ message: ChatMessage) -> Bool {
+        guard message.kind != .system, message.sender != me,
+              let bot = bots.first(where: { $0.name == message.sender }), !bot.isHuman else { return false }
+        return channels.first { $0.name == message.channel }?.dmWith != message.sender
+    }
+
+    /// A mensagem citada por uma resposta: do canal aberto ou, se for de outro canal, lida do banco.
+    func quoted(_ id: Int64) -> ChatMessage? {
+        if let m = messages.first(where: { $0.id == id }) { return m }
+        if let m = quotedCache[id] { return m }
+        guard let m = try? store?.message(id: id) else { return nil }
+        quotedCache[id] = m
+        return m
     }
 
     // MARK: - Conversas diretas
@@ -569,4 +618,10 @@ struct TaskEditorRequest: Identifiable {
     var task: ChatTask?
     var status: TaskStatus = .backlog
     var due: String?
+}
+
+/// Resposta em andamento: a mensagem citada e o canal onde a resposta será enviada.
+struct ReplyDraft: Equatable {
+    let message: ChatMessage
+    let channel: String
 }
