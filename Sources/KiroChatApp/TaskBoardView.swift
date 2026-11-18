@@ -299,7 +299,7 @@ struct TaskCard: View {
                 Text("#\(task.id)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Theme.tertiaryText)
-                Text(task.title)
+                Text(Linkify.attributed(task.title))
                     .font(.system(size: 13, weight: .medium))
                     .strikethrough(task.status == .done, color: Theme.secondaryText)
                     .foregroundStyle(task.status == .done ? Theme.secondaryText : Color.white)
@@ -308,10 +308,10 @@ struct TaskCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !task.notes.isEmpty {
-                Text(task.notes)
+                Text(Linkify.attributed(task.notes))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.secondaryText)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 6) {
@@ -399,8 +399,19 @@ struct TaskSheet: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Título").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.secondaryText)
-                TextField("O que precisa ser feito", text: $title)
-                    .textFieldStyle(.roundedBorder)
+                TextField("O que precisa ser feito", text: $title, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(2...5)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .themeCard(Theme.card, radius: 8)
+                    // Enter salva (título é uma linha só; o texto quebra sozinho na tela).
+                    .onKeyPress(keys: [.return]) { _ in
+                        if canSave { save() }
+                        return .handled
+                    }
+                LinkList(text: title)
             }
 
             HStack(alignment: .top, spacing: 16) {
@@ -445,8 +456,9 @@ struct TaskSheet: View {
                     .font(.system(size: 13))
                     .scrollContentBackground(.hidden)
                     .padding(6)
-                    .frame(height: 90)
+                    .frame(height: 110)
                     .themeCard(Theme.card, radius: 8)
+                LinkList(text: notes)
             }
 
             if let t = request.task {
@@ -464,11 +476,11 @@ struct TaskSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button(request.task == nil ? "Criar" : "Salvar") { save() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canSave)
             }
         }
         .padding(22)
-        .frame(width: 460)
+        .frame(width: 580)
         .onAppear(perform: load)
         .confirmationDialog("Apagar a tarefa #\(request.task?.id ?? 0)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Apagar", role: .destructive) {
@@ -485,6 +497,8 @@ struct TaskSheet: View {
     private var people: [BotInfo] {
         model.bots.sorted { ($0.name == model.me ? 0 : 1, $0.displayName) < ($1.name == model.me ? 0 : 1, $1.displayName) }
     }
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private func setDue(_ days: Int) {
         hasDue = true
@@ -505,9 +519,74 @@ struct TaskSheet: View {
     }
 
     private func save() {
-        model.saveTask(id: request.task?.id, title: title, notes: notes, status: status,
+        let oneLine = title.split(whereSeparator: \.isNewline).joined(separator: " ")
+        model.saveTask(id: request.task?.id, title: oneLine, notes: notes, status: status,
                        assignee: assignee.isEmpty ? nil : assignee,
                        due: hasDue ? TaskDates.string(from: dueDate) : nil)
         dismiss()
+    }
+}
+
+/// Links clicáveis encontrados num texto que está sendo editado (o campo em si não abre links).
+struct LinkList: View {
+    let text: String
+
+    var body: some View {
+        let urls = Linkify.urls(in: text)
+        if !urls.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(urls, id: \.self) { url in
+                    Link(destination: url) {
+                        Label(Linkify.short(url), systemImage: "link")
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .help(url.absoluteString)
+                }
+            }
+            .foregroundStyle(Theme.accent)
+            .padding(.leading, 2)
+        }
+    }
+}
+
+/// Links em textos de tarefas: `[texto](url)` do Markdown e URLs soltas (https://…, www.…).
+enum Linkify {
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// URLs do texto, sem repetir, na ordem em que aparecem.
+    static func urls(in text: String) -> [URL] {
+        var seen = Set<URL>()
+        return attributed(text).runs.compactMap(\.link).filter { seen.insert($0).inserted }
+    }
+
+    /// Markdown inline (negrito, código, [texto](url)) + URLs soltas viram links.
+    static func attributed(_ text: String) -> AttributedString {
+        var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
+        let plain = String(attr.characters)
+        let ns = plain as NSString
+        for match in detector?.matches(in: plain, range: NSRange(location: 0, length: ns.length)) ?? [] {
+            guard let url = match.url, let r = Range(match.range, in: plain) else { continue }
+            let start = plain.distance(from: plain.startIndex, to: r.lowerBound)
+            let len = plain.distance(from: r.lowerBound, to: r.upperBound)
+            let a = attr.characters.index(attr.startIndex, offsetBy: start)
+            let b = attr.characters.index(a, offsetBy: len)
+            if attr[a..<b].runs.contains(where: { $0.link != nil }) { continue }
+            attr[a..<b].link = url
+        }
+        for run in attr.runs where run.link != nil {
+            attr[run.range].foregroundColor = Theme.accent
+            attr[run.range].underlineStyle = .single
+        }
+        return attr
+    }
+
+    /// "github.com/org/repo/pull/42" — sem o https:// para caber na linha.
+    static func short(_ url: URL) -> String {
+        var s = url.absoluteString
+        for p in ["https://", "http://"] where s.hasPrefix(p) { s.removeFirst(p.count) }
+        return s.hasSuffix("/") ? String(s.dropLast()) : s
     }
 }

@@ -250,6 +250,7 @@ Em **Tarefas**, no topo da barra lateral, fica um quadro com quatro colunas: **B
 - Arraste os cartões entre as colunas. Clique num cartão para editar o título, o status, o responsável, a data e as notas.
 - Os filtros **Hoje**, **Amanhã**, **Futuras** e **Sem data** usam a data da tarefa. **Hoje** também mostra as atrasadas que ainda não foram feitas.
 - A barra lateral mostra quantas tarefas são para hoje e quantas estão atrasadas.
+- Título e notas aceitam links: URLs soltas (`https://…`, `www.…`) ou `[texto](url)`. No cartão eles são clicáveis; no editor aparecem clicáveis logo abaixo do campo.
 
 Os bots também criam e movem tarefas:
 
