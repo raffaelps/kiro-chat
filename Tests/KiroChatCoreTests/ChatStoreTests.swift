@@ -159,6 +159,51 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(KiroCrew.shellQuote("~/x"), "'~/x'")
     }
 
+    func testKiroCrewProfileGoesIntoThePrompt() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("crew-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let fm = FileManager.default
+        func write(_ path: String, _ text: String) throws {
+            let url = home.appendingPathComponent(path)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try write("config.json", """
+        {"agents": {"catelyn": {"member_id": "catelyn", "display_name": "Catelyn - App Quality",
+                                "description": "Cuida da qualidade dos apps.", "workspace": "member-catelyn"},
+                    "evil": {"member_id": "../evil", "workspace": "../x"}},
+         "workspaces": {"member-catelyn": {"dir": "workspace-member-catelyn"}}}
+        """)
+        try write("member-records/member-goals/catelyn.json", #"{"goals": [{"text": "Zerar crashes"}, {"text": " "}]}"#)
+        try write("members/catelyn/briefing.md", "Prioridade: revisar o release.\n")
+        try fm.createDirectory(at: home.appendingPathComponent("workspace-member-catelyn"), withIntermediateDirectories: true)
+
+        let p = try XCTUnwrap(KiroCrew.profile(forAgent: "catelyn", home: home))
+        XCTAssertEqual(p.role, "Cuida da qualidade dos apps.")
+        XCTAssertEqual(p.goals, ["Zerar crashes"])
+        XCTAssertEqual(p.briefing, "Prioridade: revisar o release.")
+        XCTAssertEqual(p.workspace?.lastPathComponent, "workspace-member-catelyn")
+        XCTAssertNil(KiroCrew.profile(forAgent: "robb", home: home))
+        let evil = try XCTUnwrap(KiroCrew.profile(forAgent: "evil", home: home))
+        XCTAssertTrue(evil.isEmpty)
+        XCTAssertNil(evil.workspace, "nomes com ../ não viram caminho")
+
+        let msg = ChatMessage(id: 1, channel: "geral", sender: "arya", senderName: "Arya", text: "@catelyn oi",
+                              kind: .message, replyTo: nil, createdAt: Date(), mentions: ["catelyn"])
+        let prompt = WakeContext.prompt(botName: "Catelyn", messages: [msg], postReply: true, profile: p)
+        XCTAssertTrue(prompt.hasPrefix("Seu perfil no Kiro Crew"))
+        XCTAssertTrue(prompt.contains("- Papel: Cuida da qualidade dos apps."))
+        XCTAssertTrue(prompt.contains("  • Zerar crashes"))
+        XCTAssertTrue(prompt.contains("Você (@Catelyn) foi chamado"))
+        XCTAssertFalse(WakeContext.prompt(botName: "Catelyn", messages: [msg]).contains("Seu perfil"))
+
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: "/x/kirocrew-bin/kirocrew chat --agent jon-chief -m \"$KIRO_CHAT_PROMPT\""), "jon-chief")
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: "'/Apps/Kiro Crew/kirocrew' chat --agent 'Jon - Chief' -m x"), "Jon - Chief")
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: "kirocrew chat -q --agent=bran"), "bran")
+        XCTAssertEqual(KiroCrew.agentKey(inCommand: "kirocrew chat --agent bran; echo fim"), "bran")
+        XCTAssertNil(KiroCrew.agentKey(inCommand: "kiro-cli chat --agent jon"))
+    }
+
     func testCleanReplyAndPostReplyPrompt() throws {
         XCTAssertEqual(WakeDispatcher.cleanReply("\u{1B}[32m  oi  \u{1B}[0m\n"), "oi")
         let crewOut = """

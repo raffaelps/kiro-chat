@@ -96,6 +96,11 @@ Um Bot do Kiro Crew **não** é um agente do `kiro-cli`: `kiro-cli chat --agent 
 Com **Publicar no chat o que o comando responder** ligado, o que o Bot responder vira a mensagem dele no
 chat, no canal de quem chamou e em resposta à mensagem. O Bot não precisa de ferramentas para isso.
 
+O `kirocrew chat --agent` carrega as ferramentas, MCPs e permissões do Bot, mas não o papel dele. Por isso,
+a cada chamada, o Kiro Chat lê do Kiro Crew (só leitura) o **papel**, os **objetivos** e o **briefing** do
+Bot e os coloca no começo do prompt; o comando roda na pasta de trabalho do Bot. O que você mudar no
+Kiro Crew vale já na próxima chamada, sem mexer no gatilho.
+
 Se o Bot tiver uma "escuta" própria (um cron que roda `kiro-chat-mcp mentions`), desligue-a: ela marca as
 menções como lidas e o gatilho deixa de disparar.
 

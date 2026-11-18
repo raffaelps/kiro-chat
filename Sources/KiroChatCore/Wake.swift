@@ -227,9 +227,12 @@ extension ChatStore {
 
 public enum WakeContext {
     /// Texto pronto para entregar ao bot acordado.
+    /// `profile`: perfil do Bot no Kiro Crew (papel, objetivos...), que vai no começo do prompt.
     public static func prompt(botName: String, messages: [ChatMessage], postReply: Bool = false,
-                              maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = []) -> String {
-        let header: String
+                              maxHops: Int = ChatStore.defaultMaxBotHops, context: [ChatMessage] = [],
+                              profile: KiroCrew.Profile? = nil) -> String {
+        let intro = profile.flatMap { $0.isEmpty ? nil : $0.promptSection + "\n\n" } ?? ""
+        var header: String
         if context.isEmpty {
             header = """
             Você (@\(botName)) foi chamado no Kiro Chat, o chat aberto entre os bots do Kiro Crew:
@@ -271,6 +274,7 @@ public enum WakeContext {
             - Na dúvida sobre se a pergunta é para todos, responda brevemente.
             """ : "")
         }
+        header = intro + header
         let hop = (messages.map(\.hop).max() ?? 0) + 1
         let left = maxHops - hop
         let rules = """
@@ -308,13 +312,13 @@ public enum WakeContext {
     public static func environment(botKey: String, botName: String, messages: [ChatMessage],
                                    databasePath: String, postReply: Bool = false,
                                    maxHops: Int = ChatStore.defaultMaxBotHops,
-                                   context: [ChatMessage] = []) -> [String: String] {
+                                   context: [ChatMessage] = [], profile: KiroCrew.Profile? = nil) -> [String: String] {
         let last = messages.last
         return [
             "KIRO_CHAT_BOT": botName,
             "KIRO_CHAT_BOT_KEY": botKey,
             "KIRO_CHAT_PROMPT": prompt(botName: botName, messages: messages, postReply: postReply,
-                                       maxHops: maxHops, context: context),
+                                       maxHops: maxHops, context: context, profile: profile),
             "KIRO_CHAT_HOP": String((messages.map(\.hop).max() ?? 0) + 1),
             "KIRO_CHAT_FROM": last?.senderName ?? "",
             "KIRO_CHAT_CHANNEL": last?.channel ?? ChatNames.defaultChannel,
@@ -432,10 +436,12 @@ public final class WakeDispatcher: @unchecked Sendable {
 
         switch t.kind {
         case .command:
+            // Bot do Kiro Crew: lê o perfil dele agora (pega o que mudou no Kiro Crew) e roda na pasta dele.
+            let profile = KiroCrew.agentKey(inCommand: t.command).flatMap { KiroCrew.profile(forAgent: $0) }
             let env = WakeContext.environment(botKey: t.bot, botName: name, messages: messages,
                                               databasePath: store.url.path, postReply: t.postReply,
-                                              maxHops: store.maxBotHops, context: context)
-            let process = runCommand(t.command, env: env) { status, output, reply in
+                                              maxHops: store.maxBotHops, context: context, profile: profile)
+            let process = runCommand(t.command, env: env, directory: profile?.workspace) { status, output, reply in
                 self.queue.async { self.processes[t.bot] = nil }
                 var note = ""
                 if self.store.wakePaused, !isTest {
@@ -505,14 +511,14 @@ public final class WakeDispatcher: @unchecked Sendable {
     }
 
     @discardableResult
-    private func runCommand(_ command: String, env: [String: String],
+    private func runCommand(_ command: String, env: [String: String], directory: URL? = nil,
                             completion: @escaping @Sendable (String, String, String) -> Void) -> Process? {
         let process = Process()
         // Shell de login: carrega o PATH do usuário (Homebrew, kiro-cli...) mesmo rodando pelo launchd.
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", command]
         process.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.currentDirectoryURL = directory ?? FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = FileHandle.nullDevice
         let outPipe = Pipe(), errPipe = Pipe()
         process.standardOutput = outPipe
