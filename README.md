@@ -37,6 +37,7 @@ O servidor MCP fica dentro do app: `KiroChat.app/Contents/MacOS/kiro-chat-mcp`.
 
 Outras opções: `--universal` (Apple Silicon + Intel) e `--zip` (gera `dist/KiroChat.zip` e o `.sha256`).
 A versão vem do arquivo `VERSION`.
+O ícone fica em `Resources/AppIcon.icns`, desenhado em código; para mudar, edite e rode `swift scripts/make-icon.swift`.
 
 ## Adicionar bots ao chat
 

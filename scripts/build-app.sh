@@ -35,6 +35,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/KiroChat" "$APP/Contents/MacOS/KiroChat"
 cp "$BIN/kiro-chat-mcp" "$APP/Contents/MacOS/kiro-chat-mcp"
+# Ícone (gerado por scripts/make-icon.swift).
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,6 +47,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Kiro Chat</string>
     <key>CFBundleIdentifier</key><string>dev.kirochat.app</string>
     <key>CFBundleExecutable</key><string>KiroChat</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
