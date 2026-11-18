@@ -146,6 +146,7 @@ struct MarkdownTable: View {
                 }
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(Color.black.opacity(onAccent ? 0.15 : 0.2)))
